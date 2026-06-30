@@ -306,6 +306,10 @@ def _build_ticker(kite, tokens, token_sym, bar_accum, strategy_cfgs):
             # Record tick to parquet (#47)
             if _tick_recorder is not None:
                 _tick_recorder.record(sym, ltp, tick.get("volume_traded", 0), now)
+
+            # Update data guardian tick counter (required for data_quality_ok check)
+            _get_guardian().on_tick(sym, ltp, ts)
+
             mk  = ts.floor("1min")
 
             if tok not in bar_accum or bar_accum[tok]["ts"] != mk:

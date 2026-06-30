@@ -6,7 +6,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=smcbot
+User=ubuntu
 WorkingDirectory=/home/smcbot/smc-trader
 EnvironmentFile=/home/smcbot/smc-trader/.env
 ExecStart=/home/smcbot/smc-trader/.venv/bin/gunicorn app:app --bind 0.0.0.0:5001 --workers 1 --threads 4 --timeout 120

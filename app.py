@@ -136,6 +136,7 @@ def in_cooldown(sym: str, direction: str, tf: int) -> bool:
 # ── Signal processing ──────────────────────────────────────────────────────────
 
 _scan_lag_ms: list[float] = []   # module-level so /api/stats can read it
+_scan_executor = None            # module-level so on_ticks (in _build_ticker) can access it
 
 def _safe_process_bar(sym: str, bar: dict, strategy_cfgs: list, kite, t0: float):
     """Wrapper for parallel executor — catches exceptions, records scan lag."""
@@ -351,7 +352,8 @@ def _build_ticker(kite, tokens, token_sym, bar_accum, strategy_cfgs):
         elog.ws_disconnect(code, reason)
         tg.ws_disconnect(code, reason)
 
-    ticker = KiteTicker(os.environ["KITE_API_KEY"], os.environ["KITE_ACCESS_TOKEN"])
+    # reconnect=False — we manage reconnects ourselves; prevents double-reconnect storm
+    ticker = KiteTicker(os.environ["KITE_API_KEY"], os.environ["KITE_ACCESS_TOKEN"], reconnect=False)
     ticker.on_ticks   = on_ticks
     ticker.on_connect = on_connect
     ticker.on_error   = on_error
@@ -394,9 +396,9 @@ def start_live_engine():
     bar_accum: dict = {}
 
     # Parallel scan executor (#35) — 4 workers, one per logical core on Oracle Free
+    global _scan_executor
     _scan_executor = ThreadPoolExecutor(max_workers=SCAN_WORKERS,
                                         thread_name_prefix="scan-worker")
-    _scan_lag_ms: list[float] = []   # rolling lag measurements for /api/stats
 
     # Heartbeat thread — every 5 min; also checks daily loss cap (#43)
     def _heartbeat():
@@ -536,6 +538,11 @@ def start_live_engine():
                     break
 
         except Exception as exc:
+            # Kill any lingering ticker before creating a new one
+            try:
+                ticker.close()
+            except Exception:
+                pass
             delay = backoff_delays[min(reconnect_attempt, len(backoff_delays) - 1)]
             elog.error("ERROR", f"Engine exception: {exc}", exc=exc)
             elog.ws_reconnect(reconnect_attempt + 1, delay)

@@ -1,0 +1,8 @@
+flask>=3.0.0
+gunicorn>=21.2.0
+kiteconnect>=5.0.1
+pandas>=2.0.0
+numpy>=1.26.0
+pyarrow>=14.0.0
+python-dotenv>=1.0.0
+tzdata>=2024.1

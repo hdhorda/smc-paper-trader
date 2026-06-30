@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SMC Paper Trading Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:"Segoe UI",Arial,sans-serif}
+body{background:#0d1117;color:#e6edf3;font-size:13px}
+header{background:#161b22;border-bottom:1px solid #30363d;padding:10px 18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+h1{font-size:15px;font-weight:700;color:#58a6ff}
+.hright{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+#mode-badge{padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700}
+.live-badge{background:#1c3a26;color:#3fb950;border:1px solid #3fb950}
+.mock-badge{background:#2d2208;color:#d29922;border:1px solid #d29922}
+#mkt-status{font-size:11px;padding:3px 9px;border-radius:10px}
+.mkt-open{background:#1c3a26;color:#3fb950}.mkt-closed{background:#21262d;color:#8b949e}
+#last-upd{font-size:11px;color:#8b949e}
+#refresh-btn{background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:11px}
+.stats-bar{display:flex;gap:10px;padding:10px 18px;flex-wrap:wrap;border-bottom:1px solid #21262d}
+.sc{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:6px 16px;text-align:center;min-width:85px}
+.sv{font-size:17px;font-weight:700;margin-top:2px}.sl{font-size:10px;color:#8b949e;text-transform:uppercase}
+.green{color:#3fb950}.red{color:#f85149}.yellow{color:#d29922}.blue{color:#58a6ff}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px 18px}
+@media(max-width:750px){.grid{grid-template-columns:1fr}}
+.panel{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.ph{padding:7px 12px;font-size:11px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #21262d;display:flex;justify-content:space-between;align-items:center}
+table{width:100%;border-collapse:collapse}
+th{padding:6px 10px;text-align:left;font-size:11px;color:#8b949e;border-bottom:1px solid #21262d;font-weight:600;background:#0d1117}
+td{padding:6px 10px;border-bottom:1px solid #1a1f26;font-size:12px}
+tr:last-child td{border-bottom:none}
+.b{padding:2px 7px;border-radius:3px;font-size:10px;font-weight:700}
+.bL{background:#1c3a26;color:#3fb950}.bS{background:#3a1c1c;color:#f85149}
+.bW{background:#1c3a26;color:#3fb950}.bX{background:#3a1c1c;color:#f85149}
+.bO{background:#1f3345;color:#58a6ff}
+.sig-item{padding:7px 12px;border-bottom:1px solid #1a1f26;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sig-t{font-size:11px;color:#8b949e;min-width:42px}.sig-sym{font-weight:700;min-width:80px}
+.sig-info{font-size:11px;color:#8b949e;flex:1}
+.empty{padding:18px;text-align:center;color:#8b949e;font-size:12px}
+.strat-row{padding:8px 12px;display:flex;justify-content:space-between;border-bottom:1px solid #1a1f26;font-size:12px}
+.full{grid-column:1/-1}
+.log-item{padding:5px 12px;border-bottom:1px solid #1a1f26;display:flex;gap:8px;align-items:flex-start;font-size:11px}
+.log-ts{color:#484f58;min-width:72px;flex-shrink:0}.log-evt{min-width:110px;flex-shrink:0;font-weight:600}
+.log-msg{color:#8b949e;flex:1;word-break:break-word}
+.lvl-INFO .log-evt{color:#58a6ff}.lvl-WARN .log-evt{color:#d29922}.lvl-ERROR .log-evt{color:#f85149}
+.lvl-ERROR{background:#1c0a0a}.lvl-WARN{background:#1c1608}
+#token-badge{padding:3px 9px;border-radius:10px;font-size:11px}
+.tok-ok{background:#1c3a26;color:#3fb950}.tok-bad{background:#3a1c1c;color:#f85149}
+#log-filter{background:#21262d;border:1px solid #30363d;color:#e6edf3;padding:3px 8px;border-radius:4px;font-size:11px}
+.dq-row{display:flex;align-items:center;gap:6px;padding:4px 12px;border-bottom:1px solid #1a1f26;font-size:11px}
+.dq-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.dq-GREEN{background:#3fb950}.dq-YELLOW{background:#d29922}.dq-RED{background:#f85149}
+.dq-sym{font-weight:700;min-width:90px}.dq-meta{color:#8b949e;flex:1}
+.dq-badge{padding:1px 5px;border-radius:3px;font-size:10px;font-weight:700}
+.dq-CB{background:#3a1c1c;color:#f85149}.dq-ST{background:#3a1c1c;color:#f85149}
+.dq-WARM{background:#1c3a26;color:#3fb950}
+</style>
+</head>
+<body>
+<header>
+  <h1>📈 SMC Paper Trading Dashboard</h1>
+  <div class="hright">
+    <span id="mode-badge" class="mock-badge">MOCK</span>
+    <span id="mkt-status" class="mkt-closed">Market Closed</span>
+    <span id="token-badge" class="tok-ok">Token OK</span>
+    <span id="ws-badge" style="font-size:11px;color:#8b949e">WS —</span>
+    <span id="last-upd">—</span>
+    <button id="refresh-btn" onclick="load()">↺ Refresh</button>
+  </div>
+</header>
+
+<div class="stats-bar">
+  <div class="sc"><div class="sv" id="s-tr">—</div><div class="sl">Trades Today</div></div>
+  <div class="sc"><div class="sv" id="s-wr">—</div><div class="sl">Win Rate</div></div>
+  <div class="sc"><div class="sv" id="s-pnl">—</div><div class="sl">Today P&amp;L</div></div>
+  <div class="sc"><div class="sv blue" id="s-op">—</div><div class="sl">Open Positions</div></div>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <div class="ph"><span>Open Positions</span><span id="op-cnt" class="blue">0</span></div>
+    <table><thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Strategy</th></tr></thead>
+    <tbody id="op-body"><tr><td colspan="6" class="empty">No open positions</td></tr></tbody></table>
+  </div>
+
+  <div class="panel">
+    <div class="ph"><span>Strategy Performance (All Time)</span></div>
+    <div id="strat-body"><div class="empty">Loading...</div></div>
+  </div>
+
+  <div class="panel">
+    <div class="ph"><span>Recent Signals</span><span id="sig-cnt" class="yellow">0</span></div>
+    <div id="sig-list"><div class="empty">No signals yet</div></div>
+  </div>
+
+  <div class="panel full">
+    <div class="ph"><span>Data Quality — Symbol Health</span><span id="dq-summary" style="color:#8b949e;font-size:11px">—</span></div>
+    <div id="dq-body" style="max-height:200px;overflow-y:auto;padding:6px 0">
+      <div class="empty">Loading data quality...</div>
+    </div>
+  </div>
+
+  <div class="panel full">
+    <div class="ph"><span>Closed Trades</span><span id="cl-cnt">0</span></div>
+    <table><thead><tr><th>Exit Time</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Reason</th><th>P&amp;L ₹</th><th>Result</th><th>Strategy</th></tr></thead>
+    <tbody id="cl-body"><tr><td colspan="9" class="empty">No closed trades</td></tr></tbody></table>
+  </div>
+
+  <div class="panel full">
+    <div class="ph">
+      <span>System Log Book</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="log-filter" onchange="loadLogs()">
+          <option value="">All events</option>
+          <option value="ERROR">Errors only</option>
+          <option value="WARN">Warnings only</option>
+          <option value="SIGNAL_FIRED">Signals</option>
+          <option value="POSITION_OPEN">Entries</option>
+          <option value="POSITION_CLOSE">Exits</option>
+          <option value="WS_DISCONNECT">WS Disconnects</option>
+          <option value="HEARTBEAT">Heartbeats</option>
+        </select>
+        <span id="log-cnt" style="color:#8b949e">0</span>
+      </div>
+    </div>
+    <div id="log-list" style="max-height:320px;overflow-y:auto"><div class="empty">Loading logs...</div></div>
+  </div>
+</div>
+
+<script>
+function fmt(n){var a=Math.round(Math.abs(n)).toLocaleString('en-IN');return(n>=0?'+₹':'-₹')+a;}
+function fmtP(n){return '₹'+(+n).toFixed(2);}
+function ts(iso){try{return new Date(iso).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});}catch(e){return iso||'—';}}
+
+async function load(){
+  try{
+    var r=await fetch('/api/state?t='+Date.now());
+    if(!r.ok) throw new Error('API error '+r.status);
+    var d=await r.json();
+    render(d);
+    var sr=await fetch('/api/signals?limit=20');
+    if(sr.ok){renderSignals(await sr.json());}
+    loadLogs();
+  }catch(e){
+    try{
+      var r2=await fetch('logs/live_state.json?t='+Date.now());
+      if(r2.ok){render(await r2.json());}
+      else{document.getElementById('last-upd').textContent='Not connected — deploy to Render or run locally';}
+    }catch(e2){
+      document.getElementById('last-upd').textContent='Cannot connect: '+e.message;
+    }
+  }
+}
+
+async function loadLogs(){
+  try{
+    var filter=document.getElementById('log-filter').value;
+    var url='/api/logs?limit=80'+(filter.startsWith('lvl:')?'&level='+filter.slice(4):filter?'&event='+filter:'');
+    var r=await fetch(url);
+    if(!r.ok) return;
+    var d=await r.json();
+    renderLogs(d.events||[]);
+  }catch(e){}
+}
+
+function renderLogs(events){
+  document.getElementById('log-cnt').textContent=events.length;
+  if(!events.length){
+    document.getElementById('log-list').innerHTML='<div class="empty">No log entries yet</div>';
+    return;
+  }
+  document.getElementById('log-list').innerHTML=events.map(e=>{
+    var t=e.ts?e.ts.slice(11,19):'';
+    var lvlCls='lvl-'+(e.level||'INFO');
+    var evtColor=e.level==='ERROR'?'#f85149':e.level==='WARN'?'#d29922':'#58a6ff';
+    return '<div class="log-item '+lvlCls+'">'
+      +'<span class="log-ts">'+t+'</span>'
+      +'<span class="log-evt" style="color:'+evtColor+'">'+e.event+'</span>'
+      +'<span class="log-msg">'+e.msg+'</span>'
+      +'</div>';
+  }).join('');
+}
+
+function render(d){
+  var st=d.stats||{};
+  var pnl=st.net_pnl||0;
+  document.getElementById('s-tr').textContent=st.trades||0;
+  var wrEl=document.getElementById('s-wr');
+  wrEl.textContent=(st.wr||0)+'%'; wrEl.className='sv '+(st.wr>=50?'green':'yellow');
+  var pnlEl=document.getElementById('s-pnl');
+  pnlEl.textContent=fmt(pnl); pnlEl.className='sv '+(pnl>=0?'green':'red');
+  document.getElementById('s-op').textContent=st.open||0;
+  document.getElementById('last-upd').textContent='Updated '+ts(d.last_updated);
+
+  // Mode badge
+  var mb=document.getElementById('mode-badge');
+  mb.textContent=(d.mode||'MOCK')+(d.paper_only?' | PAPER':'');
+  mb.className=d.mode==='LIVE'?'live-badge':'mock-badge';
+
+  // Market status
+  var ms=document.getElementById('mkt-status');
+  ms.textContent=d.market_open?'Market Open':'Market Closed';
+  ms.className=d.market_open?'mkt-open':'mkt-closed';
+
+  // Token & WS badges
+  var tb=document.getElementById('token-badge');
+  if(d.token_valid===false){tb.textContent='Token Expired — visit /auth';tb.className='tok-bad';}
+  else{tb.textContent='Token OK';tb.className='tok-ok';}
+  var wb=document.getElementById('ws-badge');
+  wb.textContent=d.ws_active?'WS Connected':'WS Inactive';
+  wb.style.color=d.ws_active?'#3fb950':'#f85149';
+
+  // Open positions
+  var open=d.open||[];
+  document.getElementById('op-cnt').textContent=open.length;
+  document.getElementById('op-body').innerHTML=open.length?open.map(p=>
+    '<tr><td><b>'+p.symbol+'</b></td>'
+    +'<td><span class="b '+(p.direction==='bull'?'bL':'bS')+'">'+(p.direction==='bull'?'L':'S')+'</span></td>'
+    +'<td>'+fmtP(p.entry_price)+'</td>'
+    +'<td style="color:#f85149">'+fmtP(p.sl_price)+'</td>'
+    +'<td style="color:#3fb950">'+fmtP(p.tp_price)+'</td>'
+    +'<td style="color:#8b949e">'+p.strategy+'</td></tr>'
+  ).join(''):'<tr><td colspan="6" class="empty">No open positions</td></tr>';
+
+  // Closed trades
+  var cl=d.closed||[];
+  document.getElementById('cl-cnt').textContent=cl.length;
+  document.getElementById('cl-body').innerHTML=cl.length?[...cl].reverse().map(t=>
+    '<tr>'
+    +'<td style="color:#8b949e">'+ts(t.exit_time)+'</td>'
+    +'<td><b>'+t.symbol+'</b></td>'
+    +'<td><span class="b '+(t.direction==='bull'?'bL':'bS')+'">'+(t.direction==='bull'?'L':'S')+'</span></td>'
+    +'<td>'+fmtP(t.entry_price)+'</td>'
+    +'<td>'+fmtP(t.exit_price)+'</td>'
+    +'<td style="color:#8b949e">'+t.exit_reason+'</td>'
+    +'<td class="'+(t.win?'green':'red')+'" style="font-weight:700">'+fmt(t.pnl_rs)+'</td>'
+    +'<td><span class="b '+(t.win?'bW':'bX')+'">'+(t.win?'WIN':'LOSS')+'</span></td>'
+    +'<td style="color:#8b949e">'+t.strategy+'</td>'
+    +'</tr>'
+  ).join(''):'<tr><td colspan="9" class="empty">No closed trades yet</td></tr>';
+
+  // Strategy summary
+  var ss=d.strategy_summary||[];
+  document.getElementById('strat-body').innerHTML=ss.length?ss.map(s=>
+    '<div class="strat-row">'
+    +'<span style="font-weight:700">'+s.strategy+'</span>'
+    +'<span>'+s.trades+' trades</span>'
+    +'<span class="'+(s.wins/Math.max(s.trades,1)>=0.5?'green':'yellow')+'">'+Math.round(s.wins/Math.max(s.trades,1)*100)+'% WR</span>'
+    +'<span class="'+(s.net_pnl>=0?'green':'red')+'" style="font-weight:700">'+fmt(s.net_pnl)+'</span>'
+    +'</div>'
+  ).join(''):'<div class="empty">No completed trades yet</div>';
+}
+
+function renderSignals(sigs){
+  document.getElementById('sig-cnt').textContent=sigs.length;
+  document.getElementById('sig-list').innerHTML=sigs.length?sigs.map(s=>
+    '<div class="sig-item">'
+    +'<span class="sig-t">'+ts(s.fired_at)+'</span>'
+    +'<span class="sig-sym">'+s.symbol+'</span>'
+    +'<span class="b '+(s.direction==='bull'?'bL':'bS')+'">'+(s.direction==='bull'?'LONG':'SHORT')+'</span>'
+    +'<span class="sig-info">Entry ₹'+s.entry_price+' | SL ₹'+s.sl_price+' | TP ₹'+s.tp_price+'</span>'
+    +'<span style="color:#8b949e;font-size:11px">'+s.strategy+' '+s.entry_tf+'min</span>'
+    +'</div>'
+  ).join(''):'<div class="empty">No signals yet today</div>';
+}
+
+async function loadDataQuality(){
+  try{
+    var r=await fetch('/api/health?detail=1');
+    if(!r.ok) return;
+    var d=await r.json();
+    var dq=d.data_quality||{};
+    var syms=dq.symbols||{};
+    var keys=Object.keys(syms);
+    if(!keys.length){document.getElementById('dq-body').innerHTML='<div class="empty">No symbol data yet</div>';return;}
+    var green=keys.filter(k=>syms[k].health==='GREEN').length;
+    var yellow=keys.filter(k=>syms[k].health==='YELLOW').length;
+    var red=keys.filter(k=>syms[k].health==='RED').length;
+    document.getElementById('dq-summary').textContent=green+'G / '+yellow+'Y / '+red+'R of '+keys.length+' symbols';
+    var rows=keys.sort().map(sym=>{
+      var h=syms[sym];
+      var badges='';
+      if(h.circuit_breaker) badges+='<span class="dq-badge dq-CB">CB</span> ';
+      if(h.stale)           badges+='<span class="dq-badge dq-ST">STALE</span> ';
+      if(h.warmed_up)       badges+='<span class="dq-badge dq-WARM">WARM</span>';
+      var meta='TPM:'+h.ticks_per_min+' | bars:'+h.bars_received+' | gaps:'+h.gap_count;
+      if(h.last_tick_ago_s!=null) meta+=' | tick '+h.last_tick_ago_s+'s ago';
+      return '<div class="dq-row">'
+        +'<div class="dq-dot dq-'+h.health+'"></div>'
+        +'<span class="dq-sym">'+sym+'</span>'
+        +'<span class="dq-meta">'+meta+'</span>'
+        +badges
+        +'</div>';
+    });
+    document.getElementById('dq-body').innerHTML=rows.join('');
+  }catch(e){}
+}
+
+load();
+loadDataQuality();
+setInterval(load,30000);
+setInterval(loadDataQuality,60000);
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: smc-paper-trader
+    env: python
+    region: singapore      # closest to India with stable latency; use oregon if issues
+    plan: starter          # $7/month — never sleeps (required for 09:15 market open)
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+    healthCheckPath: /api/health
+    envVars:
+      - key: MOCK_MODE
+        value: "false"
+      - key: MAX_OPEN_POSITIONS
+        value: "15"
+      - key: DAILY_LOSS_CAP
+        value: "50000"
+      - key: SCAN_WORKERS
+        value: "4"
+      - key: WARMUP_BARS
+        value: "2000"
+      - key: LOG_DIR
+        value: "logs"
+      # Set these manually in Render Dashboard (never put secrets in render.yaml):
+      # KITE_API_KEY
+      # KITE_API_SECRET
+      # KITE_ACCESS_TOKEN  (set daily via /auth after login)
+      # TELEGRAM_BOT_TOKEN
+      # TELEGRAM_CHAT_ID

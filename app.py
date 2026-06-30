@@ -262,6 +262,27 @@ def process_bar(sym: str, bar: dict, strategy_cfgs: list, kite=None):
 
 # ── Auto-healing WebSocket engine ──────────────────────────────────────────────
 
+def _persist_token(access_token: str):
+    """Write KITE_ACCESS_TOKEN into .env so it survives service restarts."""
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    try:
+        if os.path.exists(env_path):
+            with open(env_path, "r") as f:
+                lines = f.readlines()
+            with open(env_path, "w") as f:
+                replaced = False
+                for line in lines:
+                    if line.startswith("KITE_ACCESS_TOKEN="):
+                        f.write(f"KITE_ACCESS_TOKEN={access_token}\n")
+                        replaced = True
+                    else:
+                        f.write(line)
+                if not replaced:
+                    f.write(f"KITE_ACCESS_TOKEN={access_token}\n")
+    except Exception as e:
+        elog.error("ERROR", f"Failed to persist token to .env: {e}")
+
+
 def _build_ticker(kite, tokens, token_sym, bar_accum, strategy_cfgs):
     from kiteconnect import KiteTicker
     global _ws_active, _token_valid
@@ -495,6 +516,11 @@ def start_live_engine():
                 time.sleep(60)
                 continue
 
+            # Don't hammer Kite outside market hours — prevents IP rate-limiting
+            if not mkt.is_market_open():
+                time.sleep(60)
+                continue
+
             ticker = _build_ticker(kite, tokens, token_sym, bar_accum, strategy_cfgs)
             ticker.connect(threaded=True)
             reconnect_attempt = 0
@@ -544,12 +570,12 @@ def auth_callback():
         access_token = refresh_access_token(request_token)
         os.environ["KITE_ACCESS_TOKEN"] = access_token
         _token_valid = True
+        # Persist token to .env so it survives service restarts
+        _persist_token(access_token)
         elog.token_refreshed()
         return f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:40px">
-        <h2>Access Token Refreshed</h2>
-        <p>Token active. Engine resumes automatically.</p>
-        <p>Also paste this into Render dashboard -> Environment -> KITE_ACCESS_TOKEN
-        so it survives restarts:</p>
+        <h2>✅ Access Token Refreshed</h2>
+        <p>Token saved to .env and active. Engine resumes automatically at 09:15.</p>
         <code style="background:#f4f4f4;padding:12px;display:block;word-break:break-all;margin:16px 0">
         {access_token}</code>
         <p style="color:#888">Valid until midnight today (Kite resets daily).</p>

@@ -38,13 +38,13 @@ fi
 chown -R smcbot:smcbot /home/smcbot/smc-trader
 
 # 5. Python virtual environment
-cd /home/smcbot/smc-trader/live_trading
+cd /home/smcbot/smc-trader
 python3.11 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
 
 # 6. Create .env file (EDIT BEFORE RUNNING)
-cat > /home/smcbot/smc-trader/live_trading/.env << 'ENV_EOF'
+cat > /home/smcbot/smc-trader/.env << 'ENV_EOF'
 KITE_API_KEY=your_api_key_here
 KITE_API_SECRET=your_api_secret_here
 KITE_ACCESS_TOKEN=
@@ -58,15 +58,15 @@ WARMUP_BARS=2000
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 ENV_EOF
-chown smcbot:smcbot /home/smcbot/smc-trader/live_trading/.env
-chmod 600 /home/smcbot/smc-trader/live_trading/.env
+chown smcbot:smcbot /home/smcbot/smc-trader/.env
+chmod 600 /home/smcbot/smc-trader/.env
 
 # 7. Create log directory
 mkdir -p /home/smcbot/logs
 chown -R smcbot:smcbot /home/smcbot/logs
 
 # 8. Install systemd service
-cp /home/smcbot/smc-trader/live_trading/deploy/smc-trader.service /etc/systemd/system/
+cp /home/smcbot/smc-trader/deploy/smc-trader.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable smc-trader
 systemctl start smc-trader
@@ -89,7 +89,7 @@ echo "Auto-deploy cron installed (git pull + restart at 08:00 daily)."
 
 echo ""
 echo "=== Setup complete ==="
-echo "Edit /home/smcbot/smc-trader/live_trading/.env with your Kite credentials."
+echo "Edit /home/smcbot/smc-trader/.env with your Kite credentials."
 echo "Then run: sudo systemctl restart smc-trader"
 echo "Dashboard: http://$(curl -s ifconfig.me):5001"
 echo ""

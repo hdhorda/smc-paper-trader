@@ -7,9 +7,9 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=smcbot
-WorkingDirectory=/home/smcbot/smc-trader/live_trading
-EnvironmentFile=/home/smcbot/smc-trader/live_trading/.env
-ExecStart=/home/smcbot/smc-trader/live_trading/.venv/bin/python app.py
+WorkingDirectory=/home/smcbot/smc-trader
+EnvironmentFile=/home/smcbot/smc-trader/.env
+ExecStart=/home/smcbot/smc-trader/.venv/bin/gunicorn app:app --bind 0.0.0.0:5001 --workers 1 --threads 4 --timeout 120
 Restart=always
 RestartSec=10
 KillSignal=SIGTERM

@@ -5,15 +5,17 @@ PAPER TRADING ONLY — no real orders are ever placed.
 KiteConnect.place_order is blocked at startup (hard guardrail).
 
 Endpoints:
-  GET  /               -> live dashboard HTML
-  GET  /api/state      -> current snapshot (JSON)
-  GET  /api/trades     -> all closed trades (JSON)
-  GET  /api/signals    -> recent signals (JSON)
-  GET  /api/stats      -> daily + lifetime P&L stats (JSON)
-  GET  /api/logs       -> recent event log entries (JSON)
-  GET  /api/health     -> uptime check (JSON)
-  GET  /auth           -> Kite login redirect (refresh token daily before 9:15)
-  GET  /auth/callback  -> exchange request_token -> access_token
+  GET  /                  -> live dashboard HTML
+  GET  /api/state         -> current snapshot (JSON)
+  GET  /api/trades        -> all closed trades (JSON)
+  GET  /api/signals       -> recent signals (JSON)
+  GET  /api/stats         -> daily + lifetime P&L stats (JSON)
+  GET  /api/logs          -> recent event log entries (JSON)
+  GET  /api/health        -> uptime check + full diagnostics (JSON)
+  GET  /api/today         -> today's signals + closed trades (JSON)
+  POST /admin/restart     -> restart service (requires X-Admin-Token header)
+  GET  /auth              -> Kite login redirect (refresh token daily before 9:15)
+  GET  /auth/callback     -> exchange request_token -> access_token
 """
 
 import os
@@ -101,6 +103,10 @@ _token_valid   = True
 _dedup_seen: dict = {}
 _bar_idx: dict = {}              # symbol -> bar counter for signal expiry
 _daily_loss_cap_hit: bool = False  # #43: set True when day P&L < -DAILY_LOSS_CAP
+_last_heartbeat_at: datetime | None = None   # updated by HEARTBEAT events
+_startup_at: datetime = datetime.now()       # for uptime calculation
+
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 
 # Tick recorder — lazy init when live engine starts (#47)
 _tick_recorder = None
@@ -406,12 +412,13 @@ def start_live_engine():
 
     # Heartbeat thread — every 5 min; also checks daily loss cap (#43)
     def _heartbeat():
-        global _daily_loss_cap_hit
+        global _daily_loss_cap_hit, _last_heartbeat_at
         while True:
             time.sleep(300)
             if mkt.is_market_open():
                 daily    = db.get_daily_stats()
                 net_pnl  = daily.get("net_pnl", 0.0)
+                _last_heartbeat_at = datetime.now()
                 elog.heartbeat(
                     open_positions=len(tracker.open_positions),
                     closed_today=daily.get("trades", 0),
@@ -676,25 +683,119 @@ def api_logs():
 
 @app.route("/api/health")
 def health():
-    cal  = mkt.status()
+    from zoneinfo import ZoneInfo
+    cal      = mkt.status()
+    now_ist  = datetime.now(tz=ZoneInfo("Asia/Kolkata"))
+    uptime_s = int((datetime.now() - _startup_at).total_seconds())
+    hb_age_s = int((datetime.now() - _last_heartbeat_at).total_seconds()) if _last_heartbeat_at else None
+
+    # Guardian snapshot for per-symbol tick rates
+    guardian_snap = _get_guardian().snapshot()
+    symbols_snap  = guardian_snap.get("symbols", {})
+    low_tpm_syms  = [s for s, v in symbols_snap.items() if v.get("ticks_per_min", 0) < 10]
+    stale_syms    = [s for s, v in symbols_snap.items() if v.get("stale", False)]
+
+    # Overall health verdict
+    issues = []
+    if not _ws_active:               issues.append("websocket_down")
+    if not _token_valid:             issues.append("token_expired")
+    if low_tpm_syms:                 issues.append(f"low_tpm:{len(low_tpm_syms)}_symbols")
+    if stale_syms:                   issues.append(f"stale_data:{len(stale_syms)}_symbols")
+    if hb_age_s and hb_age_s > 600: issues.append(f"heartbeat_stale:{hb_age_s}s")
+
+    daily = db.get_daily_stats()
     base = {
-        "status":        "ok",
-        "time":          datetime.now().isoformat(),
-        "mode":          "MOCK" if MOCK_MODE else "LIVE",
-        "paper_only":    True,
-        "ws_active":     _ws_active,
-        "token_valid":   _token_valid,
-        "market_phase":  cal["phase"],
-        "is_holiday":    cal["is_holiday"],
-        "entry_allowed": cal["entry_allowed"],
-        "next_trading":  cal["next_trading_day"],
+        "status":             "ok" if not issues else "degraded",
+        "issues":             issues,
+        "time_ist":           now_ist.strftime("%H:%M:%S"),
+        "date":               now_ist.strftime("%Y-%m-%d"),
+        "uptime_seconds":     uptime_s,
+        "mode":               "MOCK" if MOCK_MODE else "LIVE",
+        "paper_only":         True,
+        "ws_active":          _ws_active,
+        "token_valid":        _token_valid,
+        "market_phase":       cal["phase"],
+        "market_open":        cal["market_open"],
+        "is_holiday":         cal["is_holiday"],
+        "entry_allowed":      cal["entry_allowed"],
+        "next_trading":       cal["next_trading_day"],
+        "heartbeat_age_secs": hb_age_s,
+        "symbols_live":       len([v for v in symbols_snap.values() if v.get("ticks_per_min", 0) >= 10]),
+        "symbols_total":      len(symbols_snap) if symbols_snap else 27,
+        "low_tpm_symbols":    low_tpm_syms,
+        "stale_symbols":      stale_syms,
+        "open_positions":     len(tracker.open_positions),
+        "closed_today":       daily.get("trades", 0),
+        "net_pnl_today":      daily.get("net_pnl", 0.0),
+        "daily_loss_cap_hit": _daily_loss_cap_hit,
     }
     if request.args.get("detail") == "1":
-        base["data_quality"] = _get_guardian().snapshot()
-        base["calendar"]     = cal
+        base["data_quality"]  = guardian_snap
+        base["calendar"]      = cal
         if _tick_recorder:
             base["tick_recorder"] = _tick_recorder.stats()
     return jsonify(base)
+
+
+@app.route("/api/today")
+def api_today():
+    """Today's signals + closed trades — used by Troubleshoot Brain for EOD consistency check."""
+    from zoneinfo import ZoneInfo
+    date_str = datetime.now(tz=ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
+    log_dir  = os.environ.get("LOG_DIR", "logs")
+    signals  = []
+    sig_path = os.path.join(log_dir, f"signals_{date_str.replace('-','')}.jsonl")
+    try:
+        with open(sig_path) as f:
+            signals = [json.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        pass
+
+    daily    = db.get_daily_stats(date_str)
+    closed   = db.get_closed_trades(limit=200)
+    # Filter to today
+    today_closed = [t for t in closed if (t.get("exit_time") or "").startswith(date_str)]
+
+    return jsonify({
+        "date":            date_str,
+        "signals":         signals,
+        "closed_trades":   today_closed,
+        "open_positions":  [
+            {"symbol": s, **p} for s, p in tracker.open_positions.items()
+        ],
+        "net_pnl":         daily.get("net_pnl", 0.0),
+        "trades_count":    daily.get("trades", 0),
+        "wins":            daily.get("wins", 0),
+        "win_rate":        daily.get("wr", 0.0),
+    })
+
+
+@app.route("/admin/restart", methods=["POST"])
+def admin_restart():
+    """
+    Restart the smc-trader systemd service.
+    Requires header: X-Admin-Token: <ADMIN_SECRET>
+    Called by Troubleshoot Brain agent for auto-healing.
+    NEVER called for monetary/infrastructure decisions — those always go to the user.
+    """
+    token = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_SECRET or token != ADMIN_SECRET:
+        elog.warn("ADMIN", "Unauthorized restart attempt")
+        return jsonify({"error": "Unauthorized"}), 403
+
+    reason = request.json.get("reason", "manual") if request.is_json else "manual"
+    elog.warn("ADMIN", f"Service restart triggered via /admin/restart — reason: {reason}")
+
+    import subprocess
+    import threading as _threading
+
+    def _do_restart():
+        import time as _time
+        _time.sleep(1)   # let Flask send the response first
+        subprocess.call(["sudo", "systemctl", "restart", "smc-trader"])
+
+    _threading.Thread(target=_do_restart, daemon=True).start()
+    return jsonify({"status": "restart_initiated", "reason": reason})
 
 
 # ── Dashboard ──────────────────────────────────────────────────────────────────

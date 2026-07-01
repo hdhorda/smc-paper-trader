@@ -292,7 +292,8 @@ def run_monitor():
                 state["last_alert_issue"] = "low_tpm_quiet"
 
     # ── 6. Heartbeat stale (no activity for > 10 min) ──
-    elif hb_age and hb_age > 700:
+    # Only restart during active market phases — post-market heartbeat silence is normal
+    elif hb_age and hb_age > 700 and phase in ("TRADING", "EOD_EXIT", "WARMUP"):
         tg(
             f"🟡 <b>Heartbeat stale — {now_ist.strftime('%H:%M')} IST</b>\n"
             f"Last heartbeat {hb_age//60}m ago. Service may be frozen.\n"

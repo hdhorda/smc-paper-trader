@@ -47,7 +47,7 @@ import numpy as np
 #  CONFIG — tweak these without touching logic
 # ─────────────────────────────────────────────────────────────
 BASE_DIR        = Path(__file__).parent
-DATA_DIR        = BASE_DIR / "Historicalcash"
+DATA_DIR        = Path(os.environ.get("SMC_DATA_DIR", str(BASE_DIR / "Historicalcash")))
 OUTPUT_DIR      = BASE_DIR / "Output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -1516,6 +1516,4 @@ if __name__ == "__main__":
         run_all(start=args.start, end=args.end, session=args.session, tf_minutes=args.tf)
     elif args.symbol:
         run_symbol(args.symbol.upper(), start=args.start, end=args.end,
-                   session=args.session, tf_minutes=args.tf)
-    else:
-        parser.print_help()
+                   session=args.session, tf_minutes=args

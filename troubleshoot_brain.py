@@ -411,73 +411,311 @@ def run_eod():
     print("[TB] EOD summary sent and state reset")
 
 
-def _check_consistency(live_signals: list, date_str: str) -> dict:
-    """
-    Compare today's live signals against backtest expectations.
+_S4A_SYMBOLS = [
+    "ABCAPITAL","APLAPOLLO","PFC","RELIANCE","BOSCHLTD","JSWSTEEL",
+    "IEX","OIL","LUPIN","GODREJCP","PAGEIND","LODHA","ALKEM",
+    "DIXON","JUBLFOOD","ETERNAL","GMRAIRPORT","DABUR","BAJAJFINSV","FORCEMOT",
+]
+_S5_SYMBOLS = ["TRENT","AMBER","SAIL","CHOLAFIN","BANKBARODA","PGEL","BIOCON"]
+_ALL_SYMBOLS = list(dict.fromkeys(_S4A_SYMBOLS + _S5_SYMBOLS))  # deduped, ordered
 
-    Checks:
-    1. Do live signals come from the correct strategy watchlists?
-    2. Are directions (bull/bear) consistent with symbols' backtest bias?
-    3. Are risk:reward ratios in expected range?
-    4. Flag any symbols that fired live but were NOT in the backtested watchlist.
-    """
-    # Backtest-validated watchlists (from S4A and S5_OB60_5 deployment config)
-    S4A_SYMBOLS = {
-        "ABCAPITAL","APLAPOLLO","PFC","RELIANCE","BOSCHLTD","JSWSTEEL",
-        "IEX","OIL","LUPIN","GODREJCP","PAGEIND","LODHA","ALKEM",
-        "DIXON","JUBLFOOD","ETERNAL","GMRAIRPORT","DABUR","BAJAJFINSV","FORCEMOT",
-    }
-    S5_SYMBOLS = {"TRENT","AMBER","SAIL","CHOLAFIN","BANKBARODA","PGEL","BIOCON"}
 
-    summary = []
+# ── Shadow backtest helpers ────────────────────────────────────────────────────
+
+def _kite_client():
+    """Return an authenticated KiteConnect client using env vars."""
+    from kiteconnect import KiteConnect
+    api_key      = os.environ.get("KITE_API_KEY", "")
+    access_token = os.environ.get("KITE_ACCESS_TOKEN", "")
+    if not api_key or not access_token:
+        raise RuntimeError("KITE_API_KEY / KITE_ACCESS_TOKEN not set in .env")
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+    return kite
+
+
+def _fetch_shadow_bars(kite, symbols: list, temp_dir) -> dict:
+    """
+    Fetch last 14 calendar days of 1-min OHLCV from Kite for each symbol.
+    Saves {symbol}_1min.parquet to temp_dir.
+    Returns {symbol: True/False} success map.
+    """
+    import pandas as pd
+    from pathlib import Path
+    from datetime import date
+
+    temp_dir = Path(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        instruments = kite.instruments("NSE")
+        inst_map = {i["tradingsymbol"]: i["instrument_token"] for i in instruments}
+    except Exception as e:
+        print(f"[shadow_bt] Could not fetch instruments: {e}")
+        return {s: False for s in symbols}
+
+    from_dt = datetime.now() - timedelta(days=14)
+    to_dt   = datetime.now()
+    results = {}
+
+    for sym in symbols:
+        token = inst_map.get(sym)
+        if not token:
+            results[sym] = False
+            continue
+        try:
+            candles = kite.historical_data(token, from_dt, to_dt, "minute",
+                                           continuous=False, oi=False)
+            if not candles:
+                results[sym] = False
+                continue
+            df = pd.DataFrame(candles).rename(columns={"date": "ts"})
+            df["ts"] = pd.to_datetime(df["ts"]).dt.tz_localize(None)
+            df["tradingsymbol"] = sym
+            df = df[["ts","tradingsymbol","open","high","low","close","volume"]]
+            df.to_parquet(temp_dir / f"{sym}_1min.parquet", index=False)
+            results[sym] = True
+        except Exception as e:
+            print(f"[shadow_bt] {sym}: fetch error — {e}")
+            results[sym] = False
+
+    return results
+
+
+def _run_shadow_backtest(temp_dir, date_str: str) -> list:
+    """
+    Run smc_backtest.py for date_str using temp_dir as data source.
+    Returns list of trade dicts from the 'All Trades' sheet.
+    """
+    import subprocess, tempfile, pandas as pd
+    from pathlib import Path
+
+    temp_dir  = Path(temp_dir)
+    out_dir   = temp_dir / "bt_out"
+    out_dir.mkdir(exist_ok=True)
+    script    = Path(__file__).parent / "smc_backtest.py"
+    python    = Path(__file__).parent / ".venv" / "bin" / "python"
+    if not python.exists():
+        python = "python3"
+
+    env = os.environ.copy()
+    env["SMC_DATA_DIR"] = str(temp_dir)
+
+    cmd = [
+        str(python), str(script),
+        "--all-tfs", "--watchlist",
+        "--start", date_str, "--end", date_str,
+        "--session-filter",
+        "--output-dir", str(out_dir),
+    ]
+
+    try:
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            print(f"[shadow_bt] smc_backtest error:\n{result.stderr[:500]}")
+    except subprocess.TimeoutExpired:
+        print("[shadow_bt] smc_backtest timed out")
+        return []
+    except Exception as e:
+        print(f"[shadow_bt] subprocess error: {e}")
+        return []
+
+    # Find output Excel
+    xl_files = list(out_dir.glob("*.xlsx"))
+    if not xl_files:
+        return []
+    try:
+        xl = pd.read_excel(xl_files[0], sheet_name=None)
+        trades_df = xl.get("All Trades", pd.DataFrame())
+        if trades_df.empty:
+            return []
+        return trades_df.to_dict("records")
+    except Exception as e:
+        print(f"[shadow_bt] Excel read error: {e}")
+        return []
+
+
+def _read_live_trades(date_str: str) -> list:
+    """Read today's paper trades CSV from the logs directory."""
+    import pandas as pd
+    from pathlib import Path
+
+    log_dir   = Path(os.environ.get("LOG_DIR", "/home/ubuntu/logs"))
+    date_key  = date_str.replace("-", "")
+    csv_path  = Path(__file__).parent / "logs" / f"paper_trades_{date_key}.csv"
+    if not csv_path.exists():
+        csv_path = log_dir / f"paper_trades_{date_key}.csv"
+    if not csv_path.exists():
+        return []
+    try:
+        df = pd.read_csv(csv_path)
+        return df.to_dict("records") if not df.empty else []
+    except Exception:
+        return []
+
+
+def _reconcile(live_trades: list, bt_trades: list) -> dict:
+    """
+    Match live trades vs backtest trades.
+    Match key: symbol + direction + tf_minutes + same calendar date, entry within ±10 min.
+    Returns dict with summary_lines and anomalies.
+    """
+    import pandas as pd
+
+    summary   = []
     anomalies = []
+    matched_bt_idx = set()
 
-    if not live_signals:
-        summary.append("   No signals fired today — nothing to compare")
+    def _ts(v):
+        try:
+            return pd.Timestamp(v)
+        except Exception:
+            return None
+
+    # For each live trade, find a matching BT trade
+    matched  = []
+    missed   = []   # in BT but not live
+    spurious = []   # in live but not BT
+
+    live_matched_idx = set()
+
+    for bi, bt in enumerate(bt_trades):
+        bt_sym  = str(bt.get("symbol","")).strip()
+        bt_dir  = str(bt.get("direction","")).strip()
+        bt_tf   = int(bt.get("tf_minutes", 0))
+        bt_ets  = _ts(bt.get("entry_ts"))
+
+        found = False
+        for li, live in enumerate(live_trades):
+            if li in live_matched_idx:
+                continue
+            lv_sym = str(live.get("symbol","")).strip()
+            lv_dir = str(live.get("direction","")).strip()
+            lv_tf  = int(live.get("entry_tf", 0))
+            lv_ets = _ts(live.get("entry_time"))
+
+            if lv_sym != bt_sym or lv_dir != bt_dir or lv_tf != bt_tf:
+                continue
+            # Within ±10 min of each other
+            if bt_ets and lv_ets and abs((bt_ets - lv_ets).total_seconds()) <= 600:
+                matched.append((bt, live))
+                matched_bt_idx.add(bi)
+                live_matched_idx.add(li)
+                found = True
+                break
+
+        if not found:
+            missed.append(bt)
+
+    for li, live in enumerate(live_trades):
+        if li not in live_matched_idx:
+            spurious.append(live)
+
+    # Build summary lines
+    total_bt   = len(bt_trades)
+    total_live = len(live_trades)
+    summary.append(f"   Backtest signals: {total_bt} | Live signals: {total_live}")
+
+    if not bt_trades and not live_trades:
+        summary.append("   ✅ Both agree — no signals today")
         return {"summary_lines": summary, "anomalies": []}
 
-    for sig in live_signals:
-        sym      = sig.get("symbol", "")
-        strategy = sig.get("strategy", "")
-        direction= sig.get("direction", "")
-        entry    = sig.get("entry_price", 0)
-        sl       = sig.get("sl", 0)
-        tp       = sig.get("tp", 0)
+    for bt, live in matched:
+        sym       = bt.get("symbol","")
+        tf        = bt.get("tf_minutes","")
+        direction = bt.get("direction","")
+        bt_entry  = float(bt.get("entry_price", 0) or 0)
+        lv_entry  = float(live.get("entry_price", 0) or 0)
+        slip      = round(lv_entry - bt_entry, 2) if bt_entry else 0
+        bt_pnl    = float(bt.get("pnl_pts", 0) or 0)
+        lv_pnl    = float(live.get("pnl_pts", 0) or 0)
+        pnl_diff  = round(lv_pnl - bt_pnl, 2)
+        exit_match = bt.get("exit_reason","") == live.get("exit_reason","")
+        icon      = "✅" if abs(pnl_diff) < 0.5 and exit_match else "⚠️"
+        slip_str  = f"entry slip={slip:+.2f}" if abs(slip) > 0.01 else "entry match"
+        pnl_str   = f"P&L slip={pnl_diff:+.2f}pts" if abs(pnl_diff) >= 0.5 else "P&L match"
+        summary.append(f"   {icon} {sym} {tf}min {direction}: {slip_str} | {pnl_str} | exit={bt.get('exit_reason','?')}")
+        if abs(pnl_diff) >= 1.0:
+            anomalies.append(f"{sym} {tf}min: P&L divergence {pnl_diff:+.2f}pts — check fill prices")
 
-        # Check 1: Symbol is in correct watchlist?
-        expected_syms = S4A_SYMBOLS if strategy == "S4A" else S5_SYMBOLS
-        if sym not in expected_syms:
-            anomalies.append(f"❌ {sym} fired on {strategy} but NOT in that strategy's watchlist")
-            continue
+    for bt in missed:
+        sym = bt.get("symbol","?")
+        tf  = bt.get("tf_minutes","?")
+        d   = bt.get("direction","?")
+        ets = str(bt.get("entry_ts","?"))[:16]
+        summary.append(f"   ❌ MISSED: {sym} {tf}min {d} @ {ets} — in backtest, not in live")
+        anomalies.append(f"MISSED {sym} {tf}min {d}: backtest found signal, live did not fire — check DATA_QUALITY / tick rate logs")
 
-        # Check 2: R:R ratio
-        if entry and sl and tp:
-            risk    = abs(entry - sl)
-            reward  = abs(tp - entry)
-            rr      = round(reward / risk, 2) if risk > 0 else 0
-            if rr < 1.5:
-                anomalies.append(f"⚠️ {sym} {strategy}: R:R={rr} below 1.5 — check SL/TP logic")
-            elif rr > 10:
-                anomalies.append(f"⚠️ {sym} {strategy}: R:R={rr} unusually high — possible data issue")
+    for live in spurious:
+        sym = live.get("symbol","?")
+        tf  = live.get("entry_tf","?")
+        d   = live.get("direction","?")
+        ets = str(live.get("entry_time","?"))[:16]
+        summary.append(f"   ⚠️ SPURIOUS: {sym} {tf}min {d} @ {ets} — live fired, not in backtest")
+        anomalies.append(f"SPURIOUS {sym} {tf}min {d}: live fired signal not seen in backtest — verify signal_engine logic")
 
-    # Check 3: Strategy signal counts vs historical rate
-    # S4A historically fires 2-8 signals/day on 20 symbols; >15 is suspicious
-    s4a_count = sum(1 for s in live_signals if s.get("strategy") == "S4A")
-    s5_count  = sum(1 for s in live_signals if s.get("strategy") == "S5_OB60_5")
-
-    if s4a_count > 15:
-        anomalies.append(f"⚠️ S4A fired {s4a_count} signals today — unusually high (backtest avg: 3-6/day). Check for over-triggering.")
-    if s5_count > 5:
-        anomalies.append(f"⚠️ S5_OB60_5 fired {s5_count} signals — higher than expected. Verify HTF OB logic.")
-
-    if anomalies:
-        summary.append(f"   ⚠️ {len(anomalies)} inconsistency(ies) found:")
-        summary.extend(f"      {a}" for a in anomalies)
-        summary.append("   → Review signal_engine.py logic vs backtest parameters")
+    if not anomalies:
+        summary.append(f"   ✅ Perfect match — {len(matched)}/{total_bt} signals aligned, system working correctly")
     else:
-        summary.append(f"   ✅ All {len(live_signals)} signal(s) consistent with backtest expectations")
-        if live_signals:
-            summary.append(f"   Watchlist coverage: OK | R:R ratios: OK | Signal count: OK")
+        summary.append(f"   ⚠️ {len(anomalies)} discrepancy(ies) — review before tomorrow")
+
+    return {"summary_lines": summary, "anomalies": anomalies}
+
+
+def _check_consistency(live_signals: list, date_str: str) -> dict:
+    """
+    Full shadow backtest reconciliation:
+    1. Fetch today's 1-min bars from Kite for all 27 symbols
+    2. Run smc_backtest.py on same-day data
+    3. Compare backtest signals vs live paper trades, per strategy
+    """
+    import tempfile, shutil
+
+    summary   = []
+    anomalies = []
+    temp_dir  = None
+
+    try:
+        kite = _kite_client()
+    except Exception as e:
+        summary.append(f"   ⚠️ Kite client unavailable — skipping shadow backtest ({e})")
+        return {"summary_lines": summary, "anomalies": []}
+
+    try:
+        temp_dir = tempfile.mkdtemp(prefix="smc_shadow_")
+        print(f"[shadow_bt] Fetching bars for {len(_ALL_SYMBOLS)} symbols → {temp_dir}")
+        fetch_results = _fetch_shadow_bars(kite, _ALL_SYMBOLS, temp_dir)
+        ok_count = sum(1 for v in fetch_results.values() if v)
+        print(f"[shadow_bt] Fetched {ok_count}/{len(_ALL_SYMBOLS)} symbols OK")
+
+        print(f"[shadow_bt] Running backtest for {date_str}…")
+        all_bt_trades  = _run_shadow_backtest(temp_dir, date_str)
+        all_live_trades = _read_live_trades(date_str)
+        print(f"[shadow_bt] BT trades={len(all_bt_trades)} | Live trades={len(all_live_trades)}")
+
+        s4a_set = set(_S4A_SYMBOLS)
+        s5_set  = set(_S5_SYMBOLS)
+
+        def _filter_by_strategy(trades, sym_set, sym_key="symbol"):
+            return [t for t in trades if str(t.get(sym_key,"")).strip() in sym_set]
+
+        for strat_name, sym_set in [("S4A", s4a_set), ("S5_OB60_5", s5_set)]:
+            bt_sub   = _filter_by_strategy(all_bt_trades, sym_set, "symbol")
+            live_sub = _filter_by_strategy(all_live_trades, sym_set, "symbol")
+            summary.append(f"\n🔬 <b>Shadow BT vs Live — {strat_name}:</b>")
+            rec = _reconcile(live_sub, bt_sub)
+            summary.extend(rec["summary_lines"])
+            anomalies.extend(rec["anomalies"])
+
+    except Exception as e:
+        summary.append(f"   ⚠️ Shadow backtest error: {e}")
+        print(f"[shadow_bt] Error: {e}")
+    finally:
+        if temp_dir:
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
 
     return {"summary_lines": summary, "anomalies": anomalies}
 

@@ -1516,4 +1516,6 @@ if __name__ == "__main__":
         run_all(start=args.start, end=args.end, session=args.session, tf_minutes=args.tf)
     elif args.symbol:
         run_symbol(args.symbol.upper(), start=args.start, end=args.end,
-                   session=args.session, tf_minutes=args
+                   session=args.session, tf_minutes=args.tf)
+    else:
+        parser.print_help()

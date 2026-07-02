@@ -95,7 +95,7 @@ DAILY_LOSS_CAP     = int(os.environ.get("DAILY_LOSS_CAP",     "50000")) # #43 ci
 SCAN_WORKERS       = int(os.environ.get("SCAN_WORKERS",        "4"))    # #35 parallel scan threads
 
 # ── Global state ───────────────────────────────────────────────────────────────
-bar_window     = BarWindow(max_bars=500)
+bar_window     = BarWindow(max_bars=int(os.environ.get("WARMUP_BARS", "2000")))
 tracker        = PaperTracker()
 _started       = False
 _ws_active     = False

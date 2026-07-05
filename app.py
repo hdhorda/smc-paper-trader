@@ -42,6 +42,7 @@ import db
 import event_logger as elog
 import telegram_notifier as tg
 from signal_engine import scan_symbol
+from a2_strategy import scan_symbol_a2
 from paper_tracker import PaperTracker
 from live_runner import BarWindow
 
@@ -83,6 +84,28 @@ STRATEGIES = {
         "htf_signal": "ob",
         "htf_tf": 60,
         "symbols": ["TRENT","AMBER","SAIL","CHOLAFIN","BANKBARODA","PGEL","BIOCON"],
+    },
+    "A2_OB60_CHOCH5": {
+        "enabled": False,   # ❌ DO NOT ENABLE — causal re-validation (2026-07-04) showed the
+                            # apparent edge was a swing-confirmation look-ahead artifact:
+                            # causal 2025 PF 0.90 (was 1.65). See vault: Backtest - Architecture 2.
+        "engine": "a2",                     # dispatched to a2_strategy.scan_symbol_a2
+        "name": "A2_OB60_CHOCH5",
+        "description": "A2: 60min causal OB zone -> 5min CHoCH trigger (NOT VALIDATED — see above)",
+        "timeframes": [5],
+        "htf_signal": "ob_causal",
+        "htf_tf": 60,
+        # Top-40 by avg daily turnover (last 60 sessions, computed 2026-07-03)
+        # — Rs 2L clips are negligible here; keeps live slippage near 0.03%/side
+        "symbols": [
+            "HDFCBANK","RELIANCE","ICICIBANK","INFY","BHARTIARTL","SBIN",
+            "BSE","VEDL","TCS","LT","ADANIPOWER","MCX","M&M","AXISBANK",
+            "ETERNAL","BAJFINANCE","IDEA","DIXON","ADANIENT","MARUTI",
+            "KOTAKBANK","BHEL","COALINDIA","SUNPHARMA","HINDALCO","INDIGO",
+            "TATASTEEL","SHRIRAMFIN","ADANIGREEN","SUZLON","POWERINDIA",
+            "WIPRO","BEL","KAYNES","COFORGE","HCLTECH","ITC","ADANIPORTS",
+            "HAL","TITAN",
+        ],
     },
 }
 
@@ -198,7 +221,10 @@ def process_bar(sym: str, bar: dict, strategy_cfgs: list, kite=None):
         if sym not in scfg["symbols"]:
             continue
         try:
-            sigs = scan_symbol(sym, df_1min, scfg, SESSION_WINDOWS)
+            if scfg.get("engine") == "a2":
+                sigs = scan_symbol_a2(sym, df_1min, scfg, SESSION_WINDOWS)
+            else:
+                sigs = scan_symbol(sym, df_1min, scfg, SESSION_WINDOWS)
             all_signals.extend(sigs)
         except Exception as exc:
             elog.error("ERROR", f"scan_symbol failed for {sym}", exc=exc,

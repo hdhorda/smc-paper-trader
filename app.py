@@ -43,6 +43,7 @@ import event_logger as elog
 import telegram_notifier as tg
 from signal_engine import scan_symbol
 from a2_strategy import scan_symbol_a2
+from s6_strategy import scan_symbol_s6
 from paper_tracker import PaperTracker
 from live_runner import BarWindow
 
@@ -84,6 +85,22 @@ STRATEGIES = {
         "htf_signal": "ob",
         "htf_tf": 60,
         "symbols": ["TRENT","AMBER","SAIL","CHOLAFIN","BANKBARODA","PGEL","BIOCON"],
+    },
+    "S6_H60E3": {
+        "enabled": True,
+        "engine": "s6",                     # dispatched to s6_strategy.scan_symbol_s6
+        "name": "S6_H60E3",
+        "description": "S6: 60min HTF Delivery + LTF Liq Sweep + CISD + IFVG entry (3min)",
+        # Best combo from backtest: HTF60min + Entry3min, PF 2.03 (IS), 1016 trades, WR 40.1%
+        # NOTE: backtest PF inflated by swing look-ahead (~10 bars). Live is naturally causal.
+        # Paper trading = true OOS. Causal PF unknown — monitor live signals before scaling.
+        "timeframes": [3],
+        "htf_tf": 60,
+        "symbols": [
+            "ABCAPITAL","APLAPOLLO","PFC","RELIANCE","BOSCHLTD","JSWSTEEL",
+            "IEX","OIL","LUPIN","GODREJCP","PAGEIND","LODHA","ALKEM",
+            "DIXON","JUBLFOOD","ETERNAL","GMRAIRPORT","DABUR","BAJAJFINSV","FORCEMOT",
+        ],
     },
     "A2_OB60_CHOCH5": {
         "enabled": False,   # ❌ DO NOT ENABLE — causal re-validation (2026-07-04) showed the
@@ -223,6 +240,8 @@ def process_bar(sym: str, bar: dict, strategy_cfgs: list, kite=None):
         try:
             if scfg.get("engine") == "a2":
                 sigs = scan_symbol_a2(sym, df_1min, scfg, SESSION_WINDOWS)
+            elif scfg.get("engine") == "s6":
+                sigs = scan_symbol_s6(sym, df_1min, scfg, SESSION_WINDOWS)
             else:
                 sigs = scan_symbol(sym, df_1min, scfg, SESSION_WINDOWS)
             all_signals.extend(sigs)
@@ -356,6 +375,7 @@ def _build_ticker(kite, tokens, token_sym, bar_accum, strategy_cfgs):
                 bar_accum[tok] = {
                     "ts": mk, "open": ltp, "high": ltp,
                     "low": ltp, "close": ltp, "volume": 0,
+                    "date": mk.date(), "tradingsymbol": sym,
                 }
             else:
                 b = bar_accum[tok]

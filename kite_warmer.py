@@ -62,7 +62,9 @@ def warmup_from_kite(kite, symbols: list[str], bar_window, max_retries: int = 3)
                     "low": "low", "close": "close", "volume": "volume",
                 })
                 df["ts"] = pd.to_datetime(df["ts"])
-                df = df[["ts","open","high","low","close","volume"]].tail(WARMUP_BARS)
+                df = df[["ts","open","high","low","close","volume"]].tail(WARMUP_BARS).copy()
+                df["tradingsymbol"] = sym
+                df["date"]          = df["ts"].dt.date
 
                 bar_window.seed(sym, df)
                 print(f"  ✓ {sym}: {len(df)} bars from Kite", flush=True)

@@ -156,11 +156,20 @@ def resample_ohlcv(df: pd.DataFrame, tf_minutes: int) -> pd.DataFrame:
     Resample 1-min OHLCV data to any N-minute timeframe.
     Preserves IST session boundaries — bars never cross day boundaries.
     Fully vectorised: single groupby.agg, no Python date loop.
+
+    Tolerates missing 'date' and 'tradingsymbol' columns — derives them
+    from 'ts' if absent (live bar_window data may not have these columns).
     """
     if tf_minutes == 1:
         return df.copy()
 
     tmp = df.copy()
+    # Derive 'date' and 'tradingsymbol' if not present (live bars lack these)
+    if "date" not in tmp.columns:
+        tmp["date"] = tmp["ts"].dt.date
+    if "tradingsymbol" not in tmp.columns:
+        tmp["tradingsymbol"] = ""
+
     # Floor each timestamp to the tf_minutes bucket (bar open time)
     tmp["_bucket"] = tmp["ts"].dt.floor(f"{tf_minutes}min")
 

@@ -188,14 +188,18 @@ def scan_symbol(
                     continue
 
             # Build signal
-            close = float(bar["close"])
+            # Entry at FVG zone edge (first retest level), SL at far zone edge.
+            # Bull: enter at fvg_top (top of gap = first support on retest),
+            #       SL at fvg_bot (full gap as buffer), TP at 2R.
+            # Bear: enter at fvg_bot (bottom of gap = first resistance on retest),
+            #       SL at fvg_top (full gap as buffer), TP at 2R.
             if direction == "bull":
-                entry = float(fvg_bot)
-                sl    = float(fvg_bot) - (float(fvg_top) - float(fvg_bot))
+                entry = float(fvg_top)
+                sl    = float(fvg_bot)
                 tp    = entry + 2.0 * (entry - sl)
             else:
-                entry = float(fvg_top)
-                sl    = float(fvg_top) + (float(fvg_top) - float(fvg_bot))
+                entry = float(fvg_bot)
+                sl    = float(fvg_top)
                 tp    = entry - 2.0 * (sl - entry)
 
             risk = abs(entry - sl)

@@ -38,6 +38,61 @@ BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = Path(os.environ.get("GAP_LOG_DIR", str(BASE_DIR / "logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── Shared SQLite db (same paper_trades.db used by app.py) ────────────────────
+# Use absolute path so cron working-directory doesn't matter.
+os.environ.setdefault("DB_PATH", str(BASE_DIR / "paper_trades.db"))
+sys.path.insert(0, str(BASE_DIR))
+import db as _db
+_db.init_db()   # no-op if tables already exist
+
+
+def _db_insert_position(pos: dict) -> int:
+    """Insert an open GapDown position into the shared trades table.
+    Returns the db row id (stored in positions JSON so EOD can close it)."""
+    _db.insert_signal({
+        "fired_at":    pos["entry_time"],
+        "symbol":      pos["symbol"],
+        "strategy":    "GapDown",
+        "direction":   "bull",
+        "entry_price": pos["entry_price"],
+        "sl_price":    None,
+        "tp_price":    None,
+        "entry_tf":    None,
+        "htf_signal":  "gap_down",
+        "fvg_top":     None,
+        "fvg_bottom":  None,
+        "pd_zone":     "discount",
+    })
+    return _db.insert_trade({
+        "symbol":      pos["symbol"],
+        "strategy":    "GapDown",
+        "direction":   "bull",
+        "entry_time":  pos["entry_time"],
+        "entry_price": pos["entry_price"],
+        "sl_price":    None,
+        "tp_price":    None,
+        "entry_tf":    None,
+        "pd_zone":     "discount",
+        "htf_signal":  "gap_down",
+    })
+
+
+def _db_close_position(trade_id: int, exit_price: float,
+                        entry_price: float, qty: int, exit_time: str):
+    """Mark a GapDown trade as closed in the shared db."""
+    pnl_pts = round(exit_price - entry_price, 4)
+    pnl_pct = round(pnl_pts / entry_price * 100, 4) if entry_price else 0
+    pnl_rs  = round(qty * pnl_pts, 2)
+    _db.close_trade(trade_id, {
+        "exit_time":   exit_time,
+        "exit_price":  exit_price,
+        "exit_reason": "EOD_EXIT",
+        "pnl_pts":     pnl_pts,
+        "pnl_pct":     pnl_pct,
+        "pnl_rs":      pnl_rs,
+        "win":         1 if pnl_rs > 0 else 0,
+    })
+
 # ── Frozen parameters ─────────────────────────────────────────────────────────
 GAP_MIN, GAP_MAX = -8.0, -2.0
 MIN_SIGNALS, MAX_SIGNALS = 8, 30
@@ -166,9 +221,15 @@ def mode_scan():
         if px <= 0:
             continue
         qty = int(POSITION_RS / px)
-        positions.append({"symbol": s, "gap_pct": round(gap, 3), "n_signals": n,
-                          "qty": qty, "entry_time": datetime.now().isoformat(timespec="seconds"),
-                          "entry_price": px})
+        entry_time = datetime.now().isoformat(timespec="seconds")
+        pos = {"symbol": s, "gap_pct": round(gap, 3), "n_signals": n,
+               "qty": qty, "entry_time": entry_time, "entry_price": px}
+        try:
+            pos["db_trade_id"] = _db_insert_position(pos)
+        except Exception as e:
+            print(f"  [db] insert failed for {s}: {e}")
+            pos["db_trade_id"] = None
+        positions.append(pos)
         print(f"  PAPER LONG {s} x{qty} @ {px} (gap {gap:.2f}%)")
     json.dump(positions, open(positions_path(today), "w"), indent=1)
     telegram(f"GapDown {today}: {len(positions)} paper entries placed. EOD exit 15:15.")
@@ -189,6 +250,7 @@ def mode_eod():
     kc = kite_client()
     quotes = get_quotes(kc, [p["symbol"] for p in positions])
     rows, total = [], 0.0
+    exit_time = datetime.now().isoformat(timespec="seconds")
     for p in positions:
         q = quotes.get(p["symbol"])
         xp = float(q["last_price"]) if q else p["entry_price"]
@@ -197,8 +259,15 @@ def mode_eod():
         total += pnl_rs
         rows.append([today, p["symbol"], p["gap_pct"], p["n_signals"], p["qty"],
                      p["entry_time"], p["entry_price"],
-                     datetime.now().isoformat(timespec="seconds"), xp,
+                     exit_time, xp,
                      round(pnl_pct, 4), round(pnl_rs, 2), pnl_pct > 0])
+        # Write close to shared db
+        trade_id = p.get("db_trade_id")
+        if trade_id:
+            try:
+                _db_close_position(trade_id, xp, p["entry_price"], p["qty"], exit_time)
+            except Exception as e:
+                print(f"  [db] close failed for {p['symbol']}: {e}")
     with open(trades_csv(), "a", newline="") as f:
         csv.writer(f).writerows(rows)
     wins = sum(1 for r in rows if r[-1])

@@ -170,10 +170,16 @@ def is_market_open() -> bool:
     return mkt.is_market_open()
 
 
-def in_cooldown(sym: str, direction: str, tf: int) -> bool:
+def in_cooldown(sym: str, direction: str, tf: int, strategy: str = "") -> bool:
     key = f"{sym}:{direction}:{tf}"
     if key in _dedup_seen:
-        if datetime.now() - _dedup_seen[key] < timedelta(minutes=5):
+        elapsed = datetime.now() - _dedup_seen[key]
+        if elapsed < timedelta(minutes=5):
+            elog.warn("SIGNAL_DEDUPED",
+                      f"{sym} [{strategy}] {direction} {tf}min suppressed — "
+                      f"cooldown {elapsed.seconds//60}m{elapsed.seconds%60}s remaining",
+                      data={"symbol": sym, "direction": direction, "tf": tf,
+                            "strategy": strategy, "elapsed_secs": round(elapsed.total_seconds())})
             return True
     _dedup_seen[key] = datetime.now()
     return False
@@ -264,12 +270,13 @@ def process_bar(sym: str, bar: dict, strategy_cfgs: list, kite=None):
         tg.signal_conflict(sym, bull_strats, bear_strats)
         return
 
+    current_close = bar.get("close", 0.0)
     for sig in all_signals:
-        if in_cooldown(sym, sig.direction, sig.entry_tf):
+        if in_cooldown(sym, sig.direction, sig.entry_tf, sig.strategy):
             continue
 
-        # Signal expiry check (price drift or too many bars elapsed)
-        valid, reason = guardian.is_signal_valid(sym, sig.entry_price, _bar_idx[sym])
+        # Signal expiry check: use actual market close, not signal zone price
+        valid, reason = guardian.is_signal_valid(sym, current_close, _bar_idx[sym])
         if not valid:
             continue   # already logged by guardian
 

@@ -23,6 +23,7 @@ Dispatch: app.py calls scan_symbol_s6() when strategy config has engine="s6".
 
 import sys
 import bisect
+import logging
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -64,7 +65,8 @@ def _prep_s6(df_1min: pd.DataFrame, tf: int) -> Optional[pd.DataFrame]:
         df = bt.detect_liq_sweeps(df)
         df = bt.detect_cisd(df)
         return df
-    except Exception:
+    except Exception as exc:
+        logging.warning("[_prep_s6] %dmin failed: %s: %s", tf, type(exc).__name__, exc)
         return None
 
 

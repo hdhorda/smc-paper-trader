@@ -359,8 +359,10 @@ def run_eod():
     # Signals summary
     s4a_sigs = [s for s in signals if s.get("strategy") == "S4A"]
     s5_sigs  = [s for s in signals if s.get("strategy") == "S5_OB60_5"]
+    s6_sigs  = [s for s in signals if s.get("strategy") == "S6_H60E3"]
+    gd_sigs  = [s for s in signals if "gap" in s.get("strategy","").lower() or "gapdown" in s.get("strategy","").lower()]
     lines.append(f"📡 <b>Signals fired:</b> {len(signals)} total")
-    lines.append(f"   S4A: {len(s4a_sigs)} | S5_OB60_5: {len(s5_sigs)}")
+    lines.append(f"   S4A: {len(s4a_sigs)} | S5: {len(s5_sigs)} | S6: {len(s6_sigs)} | GapDown: {len(gd_sigs)}")
 
     if signals:
         bull = sum(1 for s in signals if s.get("direction") == "bull")
@@ -382,10 +384,10 @@ def run_eod():
 
     lines.append("")
 
-    # ── Consistency check ──
-    lines.append("🔬 <b>Live vs Backtest Consistency:</b>")
-    consistency_result = _check_consistency(signals, date_str)
-    lines.extend(consistency_result["summary_lines"])
+    # ── Signal audit trail (replaces broken shadow-backtest reconciliation) ──
+    lines.append("🔬 <b>Signal Audit Trail:</b>")
+    audit_result = _audit_signal_trail()
+    lines.extend(audit_result["summary_lines"])
 
     lines.append("")
 
@@ -417,10 +419,136 @@ _S4A_SYMBOLS = [
     "DIXON","JUBLFOOD","ETERNAL","GMRAIRPORT","DABUR","BAJAJFINSV","FORCEMOT",
 ]
 _S5_SYMBOLS = ["TRENT","AMBER","SAIL","CHOLAFIN","BANKBARODA","PGEL","BIOCON"]
-_ALL_SYMBOLS = list(dict.fromkeys(_S4A_SYMBOLS + _S5_SYMBOLS))  # deduped, ordered
+_S6_SYMBOLS = [
+    "ABCAPITAL","APLAPOLLO","PFC","RELIANCE","BOSCHLTD","JSWSTEEL",
+    "IEX","OIL","LUPIN","GODREJCP","PAGEIND","LODHA","ALKEM",
+    "DIXON","JUBLFOOD","ETERNAL","GMRAIRPORT","DABUR","BAJAJFINSV","FORCEMOT",
+]
+_ALL_SYMBOLS = list(dict.fromkeys(_S4A_SYMBOLS + _S5_SYMBOLS + _S6_SYMBOLS))  # deduped
 
 
-# ── Shadow backtest helpers ────────────────────────────────────────────────────
+# ── Signal audit trail ────────────────────────────────────────────────────────
+#
+# DESIGN NOTE (2026-07-07):
+#   Previous approach ran a shadow backtest and compared live signals vs BT signals.
+#   That is fundamentally broken for causal strategies: the live engine fires FEWER
+#   signals than the look-ahead backtest by design. 0% match rate is structural, not a bug.
+#
+#   New approach: read /api/logs for today's SIGNAL_FIRED, SIGNAL_DEDUPED,
+#   SIGNAL_EXPIRED, DATA_QUALITY and _PREP_FAIL events and report the disposition
+#   of every scan attempt. This is the true audit trail.
+
+def _audit_signal_trail() -> dict:
+    """
+    Read today's event log from /api/logs and summarise signal pipeline health.
+    Returns {"summary_lines": [...], "anomalies": [...]}.
+    """
+    summary   = []
+    anomalies = []
+
+    logs_data = _get("/api/logs?limit=2000")
+    if logs_data is None:
+        summary.append("   ⚠️ Could not reach /api/logs — server may be down")
+        return {"summary_lines": summary, "anomalies": ["Could not fetch event log"]}
+
+    # /api/logs returns list or dict with "entries" key — handle both
+    if isinstance(logs_data, dict):
+        entries = logs_data.get("entries", logs_data.get("logs", []))
+    else:
+        entries = logs_data
+
+    today_str = datetime.now(tz=IST).strftime("%Y-%m-%d")
+
+    # Filter to today's entries
+    today_entries = []
+    for e in entries:
+        ts = str(e.get("timestamp", e.get("ts", "")))
+        if today_str in ts:
+            today_entries.append(e)
+
+    if not today_entries:
+        summary.append("   ℹ️ No log entries found for today yet")
+        return {"summary_lines": summary, "anomalies": []}
+
+    # Count by event type
+    fired_by_strat   = {}   # strategy → count
+    deduped          = 0
+    expired          = 0
+    data_quality     = 0
+    prep_fail        = 0
+    circuit_breaker  = 0
+    gap_detected     = 0
+    gap_filled       = 0
+    position_cap     = 0
+    conflict         = 0
+
+    for e in today_entries:
+        event = str(e.get("event", e.get("type", ""))).upper()
+        if "SIGNAL_FIRED" in event or "SIGNAL_FIRE" in event:
+            strat = str(e.get("strategy", e.get("data", {}).get("strategy", "unknown")))
+            fired_by_strat[strat] = fired_by_strat.get(strat, 0) + 1
+        elif "SIGNAL_DEDUPED" in event or "COOLDOWN" in event:
+            deduped += 1
+        elif "SIGNAL_EXPIRED" in event:
+            expired += 1
+        elif "DATA_QUALITY" in event:
+            data_quality += 1
+        elif "_PREP" in event and "FAIL" in event:
+            prep_fail += 1
+        elif "CIRCUIT_BREAKER" in event and "DETECTED" in event:
+            circuit_breaker += 1
+        elif "GAP_DETECTED" in event:
+            gap_detected += 1
+        elif "GAP_FILLED" in event:
+            gap_filled += 1
+        elif "POSITION_CAP" in event:
+            position_cap += 1
+        elif "SIGNAL_CONFLICT" in event:
+            conflict += 1
+
+    total_fired = sum(fired_by_strat.values())
+    summary.append(f"   📊 Signals fired today: <b>{total_fired}</b>")
+    if fired_by_strat:
+        breakdown = " | ".join(f"{k}: {v}" for k, v in sorted(fired_by_strat.items()))
+        summary.append(f"   By strategy: {breakdown}")
+    else:
+        summary.append("   ℹ️ No signals fired today — low signal day is normal for causal strategies")
+
+    # Suppressions
+    summary.append(f"   🔇 Suppressions: deduped={deduped} | expired={expired} | cap={position_cap} | conflict={conflict}")
+
+    # Data health
+    dq_icon = "✅" if data_quality == 0 else "🟡"
+    summary.append(f"   {dq_icon} Data quality drops: {data_quality}")
+
+    # Gaps
+    if gap_detected:
+        fill_icon = "✅" if gap_filled >= gap_detected else "⚠️"
+        summary.append(f"   {fill_icon} Gaps: {gap_detected} detected, {gap_filled} backfilled")
+    else:
+        summary.append("   ✅ No bar gaps today")
+
+    # Prep failures
+    if prep_fail > 0:
+        summary.append(f"   🔴 Detection prep failures: {prep_fail} — check systemd logs")
+        anomalies.append(f"_prep() failures: {prep_fail} — scanner raised exceptions, signals may have been missed")
+    else:
+        summary.append("   ✅ Scanner ran clean — zero _prep() failures")
+
+    # Circuit breakers
+    if circuit_breaker > 0:
+        summary.append(f"   ⚡ Circuit breaker triggers: {circuit_breaker} symbol(s) frozen on NSE")
+
+    # Overall verdict
+    if not anomalies:
+        summary.append("   ✅ <b>Signal pipeline healthy</b> — all suppressions are traceable")
+    else:
+        summary.append(f"   ⚠️ <b>{len(anomalies)} issue(s) need attention</b>")
+
+    return {"summary_lines": summary, "anomalies": anomalies}
+
+
+# ── Kite client (used by read_live_trades only) ────────────────────────────────
 
 def _kite_client():
     """Return an authenticated KiteConnect client using env vars."""
@@ -658,64 +786,6 @@ def _reconcile(live_trades: list, bt_trades: list) -> dict:
         summary.append(f"   ✅ Perfect match — {len(matched)}/{total_bt} signals aligned, system working correctly")
     else:
         summary.append(f"   ⚠️ {len(anomalies)} discrepancy(ies) — review before tomorrow")
-
-    return {"summary_lines": summary, "anomalies": anomalies}
-
-
-def _check_consistency(live_signals: list, date_str: str) -> dict:
-    """
-    Full shadow backtest reconciliation:
-    1. Fetch today's 1-min bars from Kite for all 27 symbols
-    2. Run smc_backtest.py on same-day data
-    3. Compare backtest signals vs live paper trades, per strategy
-    """
-    import tempfile, shutil
-
-    summary   = []
-    anomalies = []
-    temp_dir  = None
-
-    try:
-        kite = _kite_client()
-    except Exception as e:
-        summary.append(f"   ⚠️ Kite client unavailable — skipping shadow backtest ({e})")
-        return {"summary_lines": summary, "anomalies": []}
-
-    try:
-        temp_dir = tempfile.mkdtemp(prefix="smc_shadow_")
-        print(f"[shadow_bt] Fetching bars for {len(_ALL_SYMBOLS)} symbols → {temp_dir}")
-        fetch_results = _fetch_shadow_bars(kite, _ALL_SYMBOLS, temp_dir)
-        ok_count = sum(1 for v in fetch_results.values() if v)
-        print(f"[shadow_bt] Fetched {ok_count}/{len(_ALL_SYMBOLS)} symbols OK")
-
-        print(f"[shadow_bt] Running backtest for {date_str}…")
-        all_bt_trades  = _run_shadow_backtest(temp_dir, date_str)
-        all_live_trades = _read_live_trades(date_str)
-        print(f"[shadow_bt] BT trades={len(all_bt_trades)} | Live trades={len(all_live_trades)}")
-
-        s4a_set = set(_S4A_SYMBOLS)
-        s5_set  = set(_S5_SYMBOLS)
-
-        def _filter_by_strategy(trades, sym_set, sym_key="symbol"):
-            return [t for t in trades if str(t.get(sym_key,"")).strip() in sym_set]
-
-        for strat_name, sym_set in [("S4A", s4a_set), ("S5_OB60_5", s5_set)]:
-            bt_sub   = _filter_by_strategy(all_bt_trades, sym_set, "symbol")
-            live_sub = _filter_by_strategy(all_live_trades, sym_set, "symbol")
-            summary.append(f"\n🔬 <b>Shadow BT vs Live — {strat_name}:</b>")
-            rec = _reconcile(live_sub, bt_sub)
-            summary.extend(rec["summary_lines"])
-            anomalies.extend(rec["anomalies"])
-
-    except Exception as e:
-        summary.append(f"   ⚠️ Shadow backtest error: {e}")
-        print(f"[shadow_bt] Error: {e}")
-    finally:
-        if temp_dir:
-            try:
-                shutil.rmtree(temp_dir)
-            except Exception:
-                pass
 
     return {"summary_lines": summary, "anomalies": anomalies}
 

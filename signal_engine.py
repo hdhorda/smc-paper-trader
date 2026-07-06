@@ -8,6 +8,7 @@ Returns Signal objects when a valid setup is detected.
 """
 
 import sys
+import logging
 import warnings
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -92,7 +93,8 @@ def _prep(df_1min: pd.DataFrame, tf: int) -> Optional[pd.DataFrame]:
         df = bt.detect_order_blocks(df)
         df = bt.add_pd_zones(df)
         return df
-    except Exception:
+    except Exception as exc:
+        logging.warning("[_prep] %dmin failed: %s: %s", tf, type(exc).__name__, exc)
         return None
 
 

@@ -28,11 +28,16 @@ import event_logger as elog
 SIGNAL_EXPIRY_BARS    = int(os.environ.get("SIGNAL_EXPIRY_BARS", "3"))
 SIGNAL_EXPIRY_PCT     = float(os.environ.get("SIGNAL_EXPIRY_PCT", "0.003"))   # 0.3%
 STALE_SECONDS         = int(os.environ.get("STALE_SECONDS", "120"))           # 2 min
-MIN_TICKS_PER_MIN     = int(os.environ.get("MIN_TICKS_PER_MIN", "10"))
+MIN_TICKS_PER_MIN     = int(os.environ.get("MIN_TICKS_PER_MIN", "1"))
+# Lowered from 10 → 1: MODE_LTP only sends ticks on price change, not every second.
+# Less liquid stocks may have fewer than 10 price changes/min even when actively trading.
+# Stale check (STALE_SECONDS=120) already handles the "no data" case.
 MIN_WARMUP_BARS       = int(os.environ.get("MIN_WARMUP_BARS", "50"))
 LARGE_GAP_MINUTES     = int(os.environ.get("LARGE_GAP_MINUTES", "15"))
-# Circuit breaker: if price unchanged + near-zero volume for N consecutive bars → frozen (#48)
-CIRCUIT_BREAKER_BARS  = int(os.environ.get("CIRCUIT_BREAKER_BARS", "5"))
+# Circuit breaker: if price unchanged for N consecutive bars → frozen (#48)
+# Raised from 5 → 20: price consolidating for 5 min is normal. 20 min of
+# exactly same close price is a strong signal of a genuine NSE circuit limit.
+CIRCUIT_BREAKER_BARS  = int(os.environ.get("CIRCUIT_BREAKER_BARS", "20"))
 
 
 class SymbolHealth:
@@ -129,17 +134,21 @@ class DataGuardian:
 
     def _check_circuit_breaker(self, symbol: str, h: SymbolHealth, bar: dict):
         """
-        Detect NSE circuit breaker: price unchanged + near-zero volume
-        for CIRCUIT_BREAKER_BARS consecutive bars → flag and suppress signals.
-        (#48)
+        Detect NSE circuit breaker: price unchanged for CIRCUIT_BREAKER_BARS
+        consecutive bars → flag and suppress signals. (#48)
+
+        NOTE: Volume check removed — in MODE_LTP the WebSocket tick has no
+        per-tick "volume" field (only "volume_traded" cumulative), so bar.volume
+        is always 0 and the volume_frozen condition was permanently True,
+        causing spurious circuit breakers for any stock consolidating ≥5 bars.
+        Price-only freeze detection with the configurable bar threshold is
+        sufficient to catch genuine NSE circuit limits (price truly stuck).
         """
-        close  = bar.get("close", 0)
-        volume = bar.get("volume", 0)
+        close = bar.get("close", 0)
 
-        price_frozen  = (h.last_price is not None and close == h.last_price)
-        volume_frozen = volume < 10   # less than 10 shares traded in a bar
+        price_frozen = (h.last_price is not None and close == h.last_price)
 
-        if price_frozen and volume_frozen:
+        if price_frozen:
             h.frozen_bars += 1
         else:
             h.frozen_bars = 0
@@ -317,17 +326,24 @@ class DataGuardian:
         return len(self._health[symbol].tick_count_window)
 
     def data_quality_ok(self, symbol: str) -> bool:
-        """True if tick rate ok, not stale, and no circuit breaker active."""
+        """True if not stale and no circuit breaker active.
+
+        Tick-rate check intentionally removed: in MODE_LTP the WebSocket only
+        sends events on price change, so ticks/min tracks price-change frequency
+        not data health. Stale check (STALE_SECONDS=120) covers the 'no data'
+        case cleanly. MIN_TICKS_PER_MIN is kept as config but only logged, not
+        used to block scans.
+        """
         h = self._health[symbol]
-        # Circuit breaker suppresses signals for the session (#48)
+        # Circuit breaker suppresses signals (#48)
         if h.circuit_breaker:
             return False
+        # Log tick rate for observability without blocking
         tpm = self.ticks_per_min(symbol)
         if tpm < MIN_TICKS_PER_MIN:
             elog.warn("DATA_QUALITY",
-                      f"{symbol}: low tick rate {tpm}/min (min={MIN_TICKS_PER_MIN})",
+                      f"{symbol}: low tick rate {tpm}/min (min={MIN_TICKS_PER_MIN}) — monitoring only",
                       {"symbol": symbol, "ticks_per_min": tpm})
-            return False
         return not self.check_stale(symbol)
 
     # ── Signal expiry ───────────────────────────────────────────────────────────

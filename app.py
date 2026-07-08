@@ -383,13 +383,15 @@ def _build_ticker(kite, tokens, token_sym, bar_accum, strategy_cfgs):
                     "ts": mk, "open": ltp, "high": ltp,
                     "low": ltp, "close": ltp, "volume": 0,
                     "date": mk.date(), "tradingsymbol": sym,
+                    "_vol_open": tick.get("volume_traded", 0),  # cumulative vol at bar start
                 }
             else:
                 b = bar_accum[tok]
                 b["high"]  = max(b["high"], ltp)
                 b["low"]   = min(b["low"],  ltp)
                 b["close"] = ltp
-                b["volume"] += tick.get("volume", 0)
+                # volume_traded is cumulative day volume — delta gives this bar's volume
+                b["volume"] = max(tick.get("volume_traded", 0) - b.get("_vol_open", 0), 0)
 
         if current_prices:
             tracker.update_positions(current_prices, now)
@@ -872,13 +874,4 @@ def startup():
         t.start()
         elog.info("STARTUP", "Live engine thread started")
     else:
-        elog.info("STARTUP", "MOCK_MODE=true — set MOCK_MODE=false for live trading")
-
-
-with app.app_context():
-    startup()
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5001))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+        elog.info("STARTUP", "MOCK_MODE=true — se

@@ -96,12 +96,19 @@ STRATEGIES = {
         # Best combo from backtest: HTF60min + Entry3min, PF 2.03 (IS), 1016 trades, WR 40.1%
         # NOTE: backtest PF inflated by swing look-ahead (~10 bars). Live is naturally causal.
         # Paper trading = true OOS. Causal PF unknown — monitor live signals before scaling.
+        # Wave 1 expansion (2026-08-03): added 9 symbols from 213-sym backtest (ELITE+STRONG).
+        # Total: 29 symbols (was 20). Monitor for 2-3 weeks before Wave 2.
         "timeframes": [3],
         "htf_tf": 60,
         "symbols": [
+            # Original 20 (same universe as S4A)
             "ABCAPITAL","APLAPOLLO","PFC","RELIANCE","BOSCHLTD","JSWSTEEL",
             "IEX","OIL","LUPIN","GODREJCP","PAGEIND","LODHA","ALKEM",
             "DIXON","JUBLFOOD","ETERNAL","GMRAIRPORT","DABUR","BAJAJFINSV","FORCEMOT",
+            # Wave 1: ELITE tier (WR≥60%, PF≥3.0, ≥5T in 213-sym S6 backtest)
+            "LTM","GAIL","CONCOR","VBL","M&M","POLYCAB",
+            # Wave 1: STRONG tier top-3 by net P&L (WR≥50%, PF≥2.0, ≥5T)
+            "SBIN","OFSS","PATANJALI",
         ],
     },
     "A2_OB60_CHOCH5": {

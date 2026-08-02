@@ -184,8 +184,17 @@ def mode_scan():
         pass  # calendar unavailable: proceed (cron already limits Mon-Fri)
 
     kc = kite_client()
-    wait_until(9, 15, 30)
+    # 09:16:15, not 09:15:30 — day-open prices are reliably populated in quotes
+    # only ~09:16 (Hardik obs 2026-07-12). Open never changes once printed, so
+    # scanning later is identical information; entry stays 09:20 (parity kept).
+    wait_until(9, 16, 15)
     quotes = get_quotes(kc, UNIVERSE)
+    # one retry for any symbols whose open is still missing
+    missing = [s for s, q in quotes.items()
+               if not (q.get("ohlc", {}) or {}).get("open")]
+    if len(missing) > 5:
+        time.sleep(20)
+        quotes.update(get_quotes(kc, missing))
 
     cands = []
     for s, q in quotes.items():

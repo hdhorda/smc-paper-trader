@@ -250,6 +250,15 @@ def run_monitor():
 
     # ── 4. WebSocket down but service is up → restart ──
     if not ws_active and phase in ("TRADING", "EOD_EXIT", "WARMUP"):
+        uptime = h.get("uptime_seconds", 9999)
+        from datetime import time as _dtime
+        pre_market = now_ist.time() < _dtime(9, 20)  # WS legitimately not up before market opens at 09:15
+        if uptime < 600 or pre_market:
+            # Don't restart: either service just started, or it's pre-market (WS waits for 09:15)
+            reason = f"pre-market ({now_ist.strftime('%H:%M')})" if pre_market else f"service up only {uptime//60}m {uptime%60}s"
+            tg(f"⏳ WS not connected — {reason}, waiting...", silent=True)
+            _save_state(state)
+            return
         tg(f"🔴 <b>WebSocket disconnected — {now_ist.strftime('%H:%M')} IST</b>\nAuto-restarting service...")
         ok = restart_service("monitor: websocket down during market hours")
         state["restart_count"] = state.get("restart_count", 0) + 1
@@ -474,6 +483,7 @@ def _audit_signal_trail() -> dict:
     fired_by_strat   = {}   # strategy → count
     deduped          = 0
     expired          = 0
+    filtered         = 0   # MIN_RISK_PCT rejections
     data_quality     = 0
     prep_fail        = 0
     circuit_breaker  = 0
@@ -487,6 +497,8 @@ def _audit_signal_trail() -> dict:
         if "SIGNAL_FIRED" in event or "SIGNAL_FIRE" in event:
             strat = str(e.get("strategy", e.get("data", {}).get("strategy", "unknown")))
             fired_by_strat[strat] = fired_by_strat.get(strat, 0) + 1
+        elif "SIGNAL_FILTERED" in event:
+            filtered += 1
         elif "SIGNAL_DEDUPED" in event or "COOLDOWN" in event:
             deduped += 1
         elif "SIGNAL_EXPIRED" in event:
@@ -513,6 +525,8 @@ def _audit_signal_trail() -> dict:
         summary.append(f"   By strategy: {breakdown}")
     else:
         summary.append("   ℹ️ No signals fired today — low signal day is normal for causal strategies")
+    if filtered:
+        summary.append(f"   🔵 MIN_RISK_PCT filtered: {filtered} sub-tick FVG zones rejected (risk < 0.2% of entry)")
 
     # Suppressions
     summary.append(f"   🔇 Suppressions: deduped={deduped} | expired={expired} | cap={position_cap} | conflict={conflict}")

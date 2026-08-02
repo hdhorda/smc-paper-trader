@@ -16,6 +16,8 @@ Event types:
   TOKEN_REFRESHED  New access token set
   BAR_CLOSED       1min bar completed for a symbol
   SIGNAL_FIRED     Strategy signal generated
+  SIGNAL_TRACE     Complete gate audit trail for one signal candidate (TRADE_OPENED or BLOCKED@gate)
+  CANDIDATE_REJECT Scanner candidate reached entry stage but was blocked by a named filter
   POSITION_OPEN    Paper position opened
   POSITION_CLOSE   Paper position closed (with P&L)
   MARKET_OPEN      Market session started
@@ -185,6 +187,68 @@ def market_close(closed_positions: int, net_pnl: float):
     info("MARKET_CLOSE",
          f"Market closed — EOD exits: {closed_positions} | day P&L ₹{net_pnl:+.0f}",
          {"eod_exits": closed_positions, "net_pnl": net_pnl})
+
+
+def signal_trace(ctx) -> None:
+    """
+    Log the complete gate audit trail for one signal candidate.
+
+    Outcome is TRADE_OPENED (all gates passed) or BLOCKED@<gate> (first failure).
+    Level is INFO for TRADE_OPENED, WARN for BLOCKED so failures are easy to grep.
+    """
+    fail    = ctx.first_fail()
+    outcome = "BLOCKED" if fail else "TRADE_OPENED"
+    level   = "WARN"    if fail else "INFO"
+    blocked_gate   = fail["gate"]   if fail else None
+    blocked_reason = (fail["reason"] or "") if fail else ""
+    detail = f" — {blocked_gate}" + (f": {blocked_reason}" if blocked_reason else "") if fail else ""
+    _write({
+        "ts":    datetime.now().isoformat(),
+        "level": level,
+        "event": "SIGNAL_TRACE",
+        "msg":   f"{ctx.signal_id} → {outcome}{detail}",
+        "data":  {
+            "signal_id":      ctx.signal_id,
+            "symbol":         ctx.symbol,
+            "strategy":       ctx.strategy,
+            "direction":      ctx.direction,
+            "tf":             ctx.tf,
+            "bar_ts":         ctx.bar_ts,
+            "outcome":        outcome,
+            "blocked_at":     blocked_gate,
+            "blocked_reason": blocked_reason or None,
+            "gates":          ctx.gates,
+        },
+    })
+
+
+def candidate_reject(
+    symbol: str, strategy: str, direction: str, tf: int,
+    bar_ts_str: str, filter_name: str, detail: str = "",
+) -> None:
+    """
+    Log a scanner candidate that was rejected by a named filter after reaching
+    the entry-bar stage (price-in-zone for S4A/S5; CISD found for S6).
+
+    These are high-value rejections: the LTF setup was complete but a meta-filter
+    (PD_ZONE, CHOCH_BIAS, HTF_OB, HTF_DELIVERY) blocked the signal.
+    """
+    _write({
+        "ts":    datetime.now().isoformat(),
+        "level": "INFO",
+        "event": "CANDIDATE_REJECT",
+        "msg":   (f"{symbol} {direction} {tf}min @ {bar_ts_str} ✖ {filter_name}"
+                  + (f" ({detail})" if detail else "")),
+        "data":  {
+            "symbol":    symbol,
+            "strategy":  strategy,
+            "direction": direction,
+            "tf":        tf,
+            "bar_ts":    bar_ts_str,
+            "filter":    filter_name,
+            "detail":    detail,
+        },
+    })
 
 
 # ── Query ───────────────────────────────────────────────────────────────────────

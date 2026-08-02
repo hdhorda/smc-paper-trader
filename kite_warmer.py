@@ -62,6 +62,12 @@ def warmup_from_kite(kite, symbols: list[str], bar_window, max_retries: int = 3)
                     "low": "low", "close": "close", "volume": "volume",
                 })
                 df["ts"] = pd.to_datetime(df["ts"])
+                # Kite historical API returns tz-aware datetimes (+05:30).
+                # Live ticks are tz-naive. Concatenating tz-aware + tz-naive
+                # makes pandas fall back to object dtype, breaking .dt accessors.
+                # Strip tz here so historical ts matches live ts dtype exactly.
+                if df["ts"].dt.tz is not None:
+                    df["ts"] = df["ts"].dt.tz_localize(None)
                 df = df[["ts","open","high","low","close","volume"]].tail(WARMUP_BARS).copy()
                 df["tradingsymbol"] = sym
                 df["date"]          = df["ts"].dt.date

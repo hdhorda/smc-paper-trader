@@ -229,6 +229,8 @@ class DataGuardian:
             df = pd.DataFrame(candles)
             df = df.rename(columns={"date": "ts"})
             df["ts"] = pd.to_datetime(df["ts"])
+            if df["ts"].dt.tz is not None:           # Kite returns tz-aware; live ticks are tz-naive
+                df["ts"] = df["ts"].dt.tz_localize(None)   # strip tz to prevent object dtype on concat
             df = df[["ts", "open", "high", "low", "close", "volume"]]
 
             # Insert each missing bar into window

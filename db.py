@@ -15,6 +15,14 @@ def _conn():
     return conn
 
 
+def _migrate_add_column(table: str, column: str, col_type: str):
+    """Add a column to an existing table if it doesn't already exist."""
+    with _conn() as c:
+        existing = {row[1] for row in c.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
 def init_db():
     with _conn() as c:
         c.executescript("""
@@ -42,6 +50,8 @@ def init_db():
             entry_time   TEXT NOT NULL,
             exit_time    TEXT,
             entry_price  REAL,
+            sl_price     REAL,
+            tp_price     REAL,
             exit_price   REAL,
             exit_reason  TEXT,
             pnl_pts      REAL,
@@ -59,30 +69,39 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_trades_entry    ON trades(entry_time);
         """)
 
+    # ── Schema migrations ──────────────────────────────────────────────────────
+    # SQLite has no IF NOT EXISTS for columns. ALTER TABLE fails silently
+    # if column already exists — that's correct behaviour here.
+    # Add any new columns that older deployed databases may be missing.
+    _migrate_add_column("trades", "sl_price", "REAL")
+    _migrate_add_column("trades", "tp_price", "REAL")
+
 
 def insert_signal(sig_dict: dict):
     with _conn() as c:
-        c.execute("""
+        # c.execute() returns a Cursor; lastrowid lives on the cursor, NOT on the connection.
+        cur = c.execute("""
             INSERT INTO signals
             (fired_at,symbol,strategy,direction,entry_price,sl_price,tp_price,
              entry_tf,htf_signal,fvg_top,fvg_bottom,pd_zone)
             VALUES (:fired_at,:symbol,:strategy,:direction,:entry_price,:sl_price,
                     :tp_price,:entry_tf,:htf_signal,:fvg_top,:fvg_bottom,:pd_zone)
         """, sig_dict)
-        return c.lastrowid
+        return cur.lastrowid
 
 
 def insert_trade(trade_dict: dict) -> int:
     """Insert an open trade. Returns row id."""
     with _conn() as c:
-        c.execute("""
+        # c.execute() returns a Cursor; lastrowid lives on the cursor, NOT on the connection.
+        cur = c.execute("""
             INSERT INTO trades
             (symbol,strategy,direction,entry_time,entry_price,sl_price,tp_price,
              entry_tf,pd_zone,htf_signal,status)
             VALUES (:symbol,:strategy,:direction,:entry_time,:entry_price,:sl_price,
                     :tp_price,:entry_tf,:pd_zone,:htf_signal,'open')
         """, trade_dict)
-        return c.lastrowid
+        return cur.lastrowid
 
 
 def close_trade(trade_id: int, exit_dict: dict):

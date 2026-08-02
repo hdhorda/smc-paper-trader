@@ -109,6 +109,8 @@ def run_backtest_for_day(day: date, kite=None) -> list[dict]:
                 df = pd.DataFrame(candles)
                 df = df.rename(columns={"date": "ts"})
                 df["ts"] = pd.to_datetime(df["ts"])
+                if df["ts"].dt.tz is not None:           # Kite returns tz-aware; live ticks are tz-naive
+                    df["ts"] = df["ts"].dt.tz_localize(None)   # strip tz to prevent object dtype on concat
 
                 for scfg in strategy_cfgs:
                     if sym not in scfg["symbols"]:

@@ -42,8 +42,18 @@ import smc_backtest as bt
 
 from signal_engine import Signal, _in_session
 
+# Candidate rejection logger — records CISD candidates blocked by HTF_DELIVERY mismatch
+try:
+    from signal_pipeline import log_candidate_reject as _log_reject
+except ImportError:
+    def _log_reject(*a, **k): pass  # graceful degradation if file missing
+
 # How many LTF bars back to scan for a CISD trigger
 CISD_SCAN_WINDOW = 15
+
+# Minimum risk as % of entry price (mirrors signal_engine.MIN_RISK_PCT).
+# Filters IFVG zones too tight to survive bid-ask spread in live trading.
+MIN_RISK_PCT = 0.002   # 0.2% of entry price
 
 
 def _prep_s6(df_1min: pd.DataFrame, tf: int) -> Optional[pd.DataFrame]:
@@ -112,11 +122,16 @@ def scan_symbol_s6(
         cisd_ts   = pd.Timestamp(bar["ts"])
 
         # ── HTF delivery must align ───────────────────────────────────────────
+        # CISD is confirmed at this point (LTF setup complete).
+        # HTF_DELIVERY mismatch is the most common rejection for S6 — log it.
         htf_idx = bisect.bisect_right(htf_sorted, cisd_ts) - 1
         if htf_idx < 0:
             continue
         htf_dir = htf_map.get(htf_sorted[htf_idx])
         if htf_dir != direction:
+            _log_reject(symbol, strategy_cfg.get("name", "S6"), direction, ltf,
+                        cisd_ts.strftime("%H:%M"), "HTF_DELIVERY",
+                        f"htf={htf_dir} need={direction}")
             continue
 
         # ── Scan forward from CISD bar for IFVG retest entry ─────────────────
@@ -155,6 +170,20 @@ def scan_symbol_s6(
 
             risk = abs(entry_price - sl_price)
             if risk <= 0:
+                continue
+            if risk < entry_price * MIN_RISK_PCT:   # 0.2% min — filters sub-tick IFVG zones
+                try:
+                    import event_logger as _el
+                    _el.info("SIGNAL_FILTERED",
+                             f"{symbol} {direction} {ltf}min filtered: risk={risk:.3f}pts "
+                             f"({risk/entry_price*100:.3f}%) < MIN_RISK_PCT {MIN_RISK_PCT*100:.1f}%",
+                             {"symbol": symbol, "strategy": strategy_cfg.get("name","?"),
+                              "direction": direction, "tf": ltf,
+                              "entry": round(entry_price, 2), "risk_pts": round(risk, 4),
+                              "risk_pct": round(risk / entry_price * 100, 4),
+                              "filter": "MIN_RISK_PCT"})
+                except Exception:
+                    pass
                 continue
 
             sig = Signal(

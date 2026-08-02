@@ -44,8 +44,10 @@ import telegram_notifier as tg
 from signal_engine import scan_symbol
 from a2_strategy import scan_symbol_a2
 from s6_strategy import scan_symbol_s6
+from test_strategy import scan_symbol_test
 from paper_tracker import PaperTracker
 from live_runner import BarWindow
+from signal_pipeline import SignalContext
 
 # ── PAPER TRADING GUARDRAIL ────────────────────────────────────────────────────
 # Monkey-patch KiteConnect order methods before anything else loads.
@@ -123,6 +125,16 @@ STRATEGIES = {
             "WIPRO","BEL","KAYNES","COFORGE","HCLTECH","ITC","ADANIPORTS",
             "HAL","TITAN",
         ],
+    },
+    "TEST_ORB5": {
+        "enabled": False,   # ✅ Pipeline verified 2026-07-20 (SAIL S5 TP confirmed insert_trade works). Disabled 2026-07-18.
+        "engine": "test",   # dispatched to test_strategy.scan_symbol_test
+        "name": "TEST_ORB5",
+        "description": "TEST ONLY: 5-min ORB on liquid stocks. Fires daily to verify signal→trade pipeline.",
+        "timeframes": [5],
+        "htf_signal": None,
+        # Liquid stocks NOT in any other strategy's watchlist — no conflict possible
+        "symbols": ["HDFCBANK", "SBIN", "INFY"],
     },
 }
 
@@ -248,6 +260,8 @@ def process_bar(sym: str, bar: dict, strategy_cfgs: list, kite=None):
                 sigs = scan_symbol_a2(sym, df_1min, scfg, SESSION_WINDOWS)
             elif scfg.get("engine") == "s6":
                 sigs = scan_symbol_s6(sym, df_1min, scfg, SESSION_WINDOWS)
+            elif scfg.get("engine") == "test":
+                sigs = scan_symbol_test(sym, df_1min, scfg, SESSION_WINDOWS)
             else:
                 sigs = scan_symbol(sym, df_1min, scfg, SESSION_WINDOWS)
             all_signals.extend(sigs)
@@ -272,14 +286,28 @@ def process_bar(sym: str, bar: dict, strategy_cfgs: list, kite=None):
 
     current_close = bar.get("close", 0.0)
     for sig in all_signals:
-        if in_cooldown(sym, sig.direction, sig.entry_tf, sig.strategy):
+        # ── Signal pipeline: every gate is recorded in ctx for full audit trail ──
+        # If a gate fails → elog.signal_trace(ctx) logs BLOCKED@<gate> with reason.
+        # If all gates pass → elog.signal_trace(ctx) logs TRADE_OPENED.
+        # This answers "if signal generated, why was/wasn't a trade taken?" instantly.
+        ctx = SignalContext.make(sym, sig)
+
+        # Gate 1: COOLDOWN — suppress duplicate signal within 5-min window
+        # in_cooldown() sets dedup timestamp as a side-effect when it returns False (not in cooldown)
+        if not ctx.gate("COOLDOWN", not in_cooldown(sym, sig.direction, sig.entry_tf, sig.strategy)):
+            elog.signal_trace(ctx)
             continue
 
-        # Signal expiry check: use actual market close, not signal zone price
+        # Gate 2: SIGNAL_VALID — FVG zone still valid at current close price
+        # guardian.is_signal_valid() logs its own reason internally; we capture it in the trace too
         valid, reason = guardian.is_signal_valid(sym, current_close, _bar_idx[sym])
-        if not valid:
-            continue   # already logged by guardian
+        if not ctx.gate("SIGNAL_VALID", valid, reason or ""):
+            elog.signal_trace(ctx)
+            continue
 
+        # Gate 3: SIGNAL_LOGGED — signal is valid; record it in DB and notify Telegram
+        # This gate always passes; it marks the point where the signal becomes official
+        ctx.gate("SIGNAL_LOGGED", True)
         db.insert_signal({
             "fired_at": sig.timestamp.isoformat(),
             "symbol": sym, "strategy": sig.strategy,
@@ -294,29 +322,58 @@ def process_bar(sym: str, bar: dict, strategy_cfgs: list, kite=None):
         tg.signal_fired(sym, sig.direction, sig.strategy, sig.entry_price, sig.sl_price, sig.tp_price, sig.entry_tf)
         guardian.register_signal(sig, _bar_idx[sym])
 
-        if sym not in tracker.open_positions:
-            # Max concurrent positions cap (#42)
-            if len(tracker.open_positions) >= MAX_OPEN_POSITIONS:
-                elog.warn("POSITION_CAP_HIT",
-                          f"Cap {MAX_OPEN_POSITIONS} reached — queuing {sym}",
-                          data={"symbol": sym, "cap": MAX_OPEN_POSITIONS,
-                                "open": len(tracker.open_positions)})
-                tg.position_cap_hit(sym, MAX_OPEN_POSITIONS, len(tracker.open_positions))
-                continue
-            tracker.open_position(sig)
-            guardian.consume_signal(sym)
-            entry_p = tracker.open_positions[sym].entry_price  # slipped price
-            db.insert_trade({
-                "symbol": sym, "strategy": sig.strategy,
-                "direction": sig.direction,
-                "entry_time": sig.timestamp.isoformat(),
-                "entry_price": entry_p,
-                "sl_price": sig.sl_price, "tp_price": sig.tp_price,
-                "entry_tf": sig.entry_tf,
-                "pd_zone": sig.pd_zone, "htf_signal": sig.htf_signal,
-            })
-            elog.position_open(sym, sig.direction, entry_p, sig.sl_price, sig.tp_price)
-            tg.position_open(sym, sig.direction, entry_p, sig.sl_price, sig.tp_price, sig.strategy)
+        # Gate 4: POSITION_FREE — no existing open trade for this symbol
+        already_open = sym in tracker.open_positions
+        if not ctx.gate("POSITION_FREE", not already_open,
+                        "existing position" if already_open else ""):
+            elog.signal_trace(ctx)
+            continue
+
+        # Gate 5: POSITION_CAP — under max concurrent positions limit (#42)
+        n_open  = len(tracker.open_positions)
+        cap_hit = n_open >= MAX_OPEN_POSITIONS
+        if not ctx.gate("POSITION_CAP", not cap_hit,
+                        f"{n_open}/{MAX_OPEN_POSITIONS} open"):
+            elog.warn("POSITION_CAP_HIT",
+                      f"Cap {MAX_OPEN_POSITIONS} reached — {sym} queued",
+                      data={"symbol": sym, "cap": MAX_OPEN_POSITIONS, "open": n_open})
+            tg.position_cap_hit(sym, MAX_OPEN_POSITIONS, n_open)
+            elog.signal_trace(ctx)
+            continue
+
+        # All gates passed — open position
+        # open_position() returns True only if the position was actually inserted.
+        # False means either:
+        #   (a) a concurrent thread already opened this symbol between the POSITION_FREE
+        #       gate check above and the lock acquisition inside the tracker (TOCTOU race)
+        #       — root cause of the LODHA ×5 duplicate-trade bug (Jul 30 2026), or
+        #   (b) the 45-min SL cooldown on (symbol, strategy) is still active.
+        # In both cases we must NOT call db.insert_trade() — hence the return value check.
+        # ctx.gate("TRADE_OPENED") is recorded AFTER the check so the audit trace is
+        # accurate: a blocked open_position() produces no TRADE_OPENED gate entry.
+        opened = tracker.open_position(sig)
+        if not opened:
+            elog.warn("OPEN_BLOCKED",
+                      f"{sym}: open_position() returned False — race dedup or SL cooldown; db insert skipped")
+            elog.signal_trace(ctx)
+            continue
+        ctx.gate("TRADE_OPENED", True)
+        guardian.consume_signal(sym)
+        entry_p = tracker.open_positions[sym].entry_price  # slipped price
+        row_id = db.insert_trade({
+            "symbol": sym, "strategy": sig.strategy,
+            "direction": sig.direction,
+            "entry_time": sig.timestamp.isoformat(),
+            "entry_price": entry_p,
+            "sl_price": sig.sl_price, "tp_price": sig.tp_price,
+            "entry_tf": sig.entry_tf,
+            "pd_zone": sig.pd_zone, "htf_signal": sig.htf_signal,
+        })
+        # Store SQLite row id so _close() can update status to 'closed' on exit
+        tracker.open_positions[sym].trade_db_id = row_id
+        elog.position_open(sym, sig.direction, entry_p, sig.sl_price, sig.tp_price)
+        tg.position_open(sym, sig.direction, entry_p, sig.sl_price, sig.tp_price, sig.strategy)
+        elog.signal_trace(ctx)   # log successful end-to-end trace
 
 
 # ── Auto-healing WebSocket engine ──────────────────────────────────────────────
@@ -406,7 +463,8 @@ def _build_ticker(kite, tokens, token_sym, bar_accum, strategy_cfgs):
     def on_error(ws, code, reason):
         global _token_valid
         elog.ws_error(code, reason)
-        if code == 403 or "token" in str(reason).lower():
+        reason_str = str(reason).lower()
+        if code == 403 or "token" in reason_str or "403" in reason_str or "forbidden" in reason_str:
             _token_valid = False
             elog.token_expired()
             tg.token_expired()
@@ -471,7 +529,10 @@ def start_live_engine():
         while True:
             time.sleep(300)
             if mkt.is_market_open():
-                daily    = db.get_daily_stats()
+                # Use in-memory tracker stats — db.get_daily_stats() queries
+                # SQLite which never gets updated on close (paper_tracker writes
+                # to CSV only). tracker.daily_stats() is always accurate.
+                daily    = tracker.daily_stats()
                 net_pnl  = daily.get("net_pnl", 0.0)
                 _last_heartbeat_at = datetime.now()
                 elog.heartbeat(
@@ -524,7 +585,7 @@ def start_live_engine():
                     if df is not None and len(df) > 0:
                         current_prices[sym] = float(df.iloc[-1]["close"])
                 closed = tracker.update_positions(current_prices, datetime.now(), force_eod=True)
-                daily  = db.get_daily_stats()
+                daily  = tracker.daily_stats()   # db.get_daily_stats() never reflects closes (CSV-only)
                 elog.market_close(
                     closed_positions=len(open_syms),
                     net_pnl=daily.get("net_pnl", 0.0),
@@ -572,6 +633,44 @@ def start_live_engine():
                 )
     threading.Thread(target=_consistency_loop, daemon=True).start()
 
+    # Bar flusher thread — flushes stale bars every 90s regardless of ticks.
+    # Fixes missed signals for low-volume symbols where no new-minute tick arrives
+    # before ENTRY_CUTOFF (e.g. BOSCHLTD 14:54 signal lost because 14:57 tick
+    # never came before 15:00 cutoff).
+    _bar_flushed: dict = {}   # tok -> last flushed bar_ts (prevents double-scan)
+
+    def _bar_flush_worker():
+        import pandas as _pd
+        while True:
+            time.sleep(90)
+            if not mkt.is_market_open():
+                continue
+            try:
+                now_mk = _pd.Timestamp.now(tz="Asia/Kolkata").floor("1min")
+                for tok, bar in list(bar_accum.items()):
+                    bar_mk = _pd.Timestamp(bar.get("ts", _pd.Timestamp(0, tz="Asia/Kolkata")))
+                    if bar_mk.tzinfo is None:
+                        bar_mk = bar_mk.tz_localize("Asia/Kolkata")
+                    if bar_mk >= now_mk:
+                        continue   # still in current minute — not stale
+                    if _bar_flushed.get(tok) == bar_mk:
+                        continue   # already flushed this bar
+                    _bar_flushed[tok] = bar_mk
+                    sym = bar.get("tradingsymbol") or token_sym.get(tok)
+                    if sym:
+                        _t0 = time.monotonic()
+                        _scan_executor.submit(
+                            _safe_process_bar, sym, bar, strategy_cfgs, kite, _t0
+                        )
+                        elog.info("BAR_FLUSH",
+                                  f"Flushed stale bar {sym} @ {bar_mk.strftime('%H:%M')}",
+                                  data={"symbol": sym, "bar_ts": str(bar_mk)})
+            except Exception as _exc:
+                elog.error("ERROR", f"Bar flusher error: {_exc}")
+
+    threading.Thread(target=_bar_flush_worker, daemon=True, name="bar-flusher").start()
+    elog.info("STARTUP", "Bar flusher thread started (90s interval)")
+
     reconnect_attempt = 0
     backoff_delays    = [5, 10, 20, 40, 60]
 
@@ -595,7 +694,7 @@ def start_live_engine():
 
             while True:
                 time.sleep(30)
-                if not _ws_active and is_market_open():
+                if not _ws_active and mkt.is_market_open():
                     elog.warn("WS_DISCONNECT", "WS not active during market — forcing reconnect")
                     try:
                         ticker.close()
@@ -869,9 +968,30 @@ def startup():
     _started = True
     elog.purge_old_logs()
     elog.startup({k: v["description"] for k, v in STRATEGIES.items()})
+
+    # Reload any positions that were open before this restart (survived in SQLite)
+    reloaded = tracker.reload_open_positions()
+    if reloaded:
+        elog.info("POSITIONS_RELOADED",
+                  f"Reloaded {len(reloaded)} open position(s) from SQLite after restart: {reloaded}",
+                  {"symbols": reloaded, "count": len(reloaded)})
+        tg.error_alert(
+            f"⚠️ Service restarted — reloaded {len(reloaded)} open position(s): "
+            + ", ".join(reloaded)
+        )
+
     if not MOCK_MODE:
         t = threading.Thread(target=start_live_engine, daemon=True)
         t.start()
         elog.info("STARTUP", "Live engine thread started")
     else:
-        elog.info("STARTUP", "MOCK_MODE=true — se
+        elog.info("STARTUP", "MOCK_MODE=true - set MOCK_MODE=false for live trading")
+
+
+with app.app_context():
+    startup()
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)

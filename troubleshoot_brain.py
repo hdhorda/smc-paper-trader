@@ -249,7 +249,7 @@ def run_monitor():
         return
 
     # ── 4. WebSocket down but service is up → restart ──
-    if not ws_active and phase in ("TRADING", "EOD_EXIT", "WARMUP"):
+    if not ws_active and phase in ("TRADING", "WARMUP"):  # EOD_EXIT excluded: WS legitimately closes at 15:15 cash end
         uptime = h.get("uptime_seconds", 9999)
         from datetime import time as _dtime
         pre_market = now_ist.time() < _dtime(9, 20)  # WS legitimately not up before market opens at 09:15
@@ -460,9 +460,9 @@ def _audit_signal_trail() -> dict:
         summary.append("   ⚠️ Could not reach /api/logs — server may be down")
         return {"summary_lines": summary, "anomalies": ["Could not fetch event log"]}
 
-    # /api/logs returns list or dict with "entries" key — handle both
+    # /api/logs returns dict with "events" key (see event_logger.py get_recent()) — handle both
     if isinstance(logs_data, dict):
-        entries = logs_data.get("entries", logs_data.get("logs", []))
+        entries = logs_data.get("events", logs_data.get("entries", logs_data.get("logs", [])))
     else:
         entries = logs_data
 

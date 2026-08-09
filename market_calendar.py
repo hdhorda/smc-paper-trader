@@ -5,7 +5,7 @@ Single source of truth for all time-based decisions in the live engine.
 
 Rules (as configured):
   - Trading days   : Monday–Friday, excluding NSE holidays
-  - Market open    : 09:15 – 15:30 (WebSocket active, positions monitored)
+  - Market open    : 09:15 – 15:40 (WebSocket active, positions monitored; F&O till 15:40 per NSE Aug-2026 rules)
   - Entry allowed  : 09:15 – 15:00 (no new positions in last 30 min)
   - EOD exit time  : 15:00 (hard close all open positions, no new entries)
   - Pre-market     : 09:00 – 09:15 (warmup window, no trading)
@@ -80,7 +80,7 @@ class MarketCalendar:
 
     # Configurable via env vars
     MARKET_OPEN   = time(9, 15)
-    MARKET_CLOSE  = time(15, 30)
+    MARKET_CLOSE  = time(15, 40)   # NSE Aug-2026: cash continuous 15:15, CAS 15:15–15:35, F&O 15:40
     ENTRY_CUTOFF  = time(15,  0)   # no new entries after this
     EOD_EXIT_TIME = time(15,  0)   # hard close all positions at this time
     WARMUP_START  = time(9,   0)   # start Kite warmup at this time
@@ -120,7 +120,7 @@ class MarketCalendar:
     # ── Intraday checks ────────────────────────────────────────────────────────
 
     def is_market_open(self) -> bool:
-        """True during 09:15–15:30 on a trading day. WebSocket should be active."""
+        """True during 09:15–15:40 on a trading day. WebSocket should be active."""
         if not self.is_trading_day():
             return False
         t = self._now().time().replace(tzinfo=None)
@@ -138,7 +138,7 @@ class MarketCalendar:
 
     def is_eod_exit_window(self) -> bool:
         """
-        True between 15:00 and 15:30 — trigger hard close of all open positions.
+        True between 15:00 and 15:40 — trigger hard close of all open positions.
         The engine calls this every bar cycle; first True triggers the mass exit.
         """
         if not self.is_trading_day():

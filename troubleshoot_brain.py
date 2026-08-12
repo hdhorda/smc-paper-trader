@@ -45,21 +45,33 @@ def tg(msg: str, silent: bool = False):
     if not TG_TOKEN or not TG_CHAT:
         print(f"[TG] {msg}")
         return
-    try:
-        payload = json.dumps({
-            "chat_id":              TG_CHAT,
-            "text":                 msg,
-            "parse_mode":           "HTML",
-            "disable_notification": silent,
-        }).encode()
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=10)
-    except Exception as e:
-        print(f"[TG ERROR] {e}")
+    # Telegram hard limit is 4096 chars — truncate gracefully to avoid HTTP 400
+    if len(msg) > 4000:
+        msg = msg[:3950] + "\n\n⚠️ Message truncated — full log at ~/logs/tb_eod.log"
+
+    def _send(text: str, parse_mode: str | None = "HTML") -> bool:
+        body: dict = {"chat_id": TG_CHAT, "text": text, "disable_notification": silent}
+        if parse_mode:
+            body["parse_mode"] = parse_mode
+        try:
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=10)
+            return True
+        except Exception as e:
+            print(f"[TG ERROR] {e}")
+            return False
+
+    # Try HTML first; if Telegram rejects (e.g. symbol '&' in M&M breaks HTML parser),
+    # fall back to plain text by stripping tags — message always gets through.
+    if not _send(msg, "HTML"):
+        import re
+        plain = re.sub(r"<[^>]+>", "", msg)   # strip <b>, <i>, etc.
+        plain = plain.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        _send(plain, None)
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
